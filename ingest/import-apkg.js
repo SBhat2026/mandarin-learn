@@ -11,12 +11,20 @@ import { tonePattern } from '../server/pinyin.js';
 const SOURCES_DIR = join(ROOT, 'ingest', 'sources');
 
 function parseArgs(argv) {
-  const args = { files: [], type: 'auto', source: null, yes: false };
+  const args = { files: [], type: 'auto', source: null, yes: false, map: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--type') args.type = argv[++i];
     else if (a === '--source') args.source = argv[++i];
     else if (a === '--yes' || a === '-y') args.yes = true;
+    // Explicit field mapping, e.g. --map hanzi=1,pinyin=3,english=5,audio=7
+    else if (a === '--map') {
+      args.map = {};
+      for (const pair of String(argv[++i]).split(',')) {
+        const [k, v] = pair.split('=');
+        if (k && v !== undefined) args.map[k.trim()] = Number(v);
+      }
+    }
     else args.files.push(a);
   }
   return args;
@@ -67,8 +75,15 @@ async function importFile(path, args) {
   for (const [mid, notes] of byModel) {
     const model = deck.models[mid] || { name: mid, fields: notes[0].fields.map((_, i) => 'field' + i) };
     const sample = notes.slice(0, 30);
-    const guess = autoDetect(model.fields, sample);
-    const map = await confirmMapping(model.name, model.fields, sample, guess, { yes: args.yes });
+    // Explicit --map overrides detection; otherwise auto-detect (+ confirm unless --yes).
+    let map;
+    if (args.map) {
+      map = { hanzi: null, pinyin: null, english: null, audio: null, ...args.map };
+      console.log(`  ${model.name}: using explicit field map ${JSON.stringify(args.map)}`);
+    } else {
+      const guess = autoDetect(model.fields, sample);
+      map = await confirmMapping(model.name, model.fields, sample, guess, { yes: args.yes });
+    }
     if (map.hanzi == null) { console.log(`  skip note type ${model.name}: no hanzi field`); continue; }
 
     const sampleHanzi = sample.map(n => cleanField(n.fields[map.hanzi]));

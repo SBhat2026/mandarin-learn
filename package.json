@@ -8,6 +8,8 @@
     "web": "vite",
     "api": "node server/index.js",
     "build": "vite build",
+    "build:static": "node scripts/export-static.js && VITE_STATIC=1 VITE_BASE=/mandarin-learn/ vite build",
+    "deploy:pages": "bash scripts/deploy-pages.sh",
     "preview": "vite preview",
     "db:init": "node scripts/init-db.js",
     "db:reset": "node scripts/reset-db.js",

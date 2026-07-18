@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom';
-import { api } from './lib/api.js';
+import { api, isDemo } from './lib/api.js';
 import Home from './pages/Home.jsx';
 import Session from './pages/Session.jsx';
 import ToneTrainer from './pages/ToneTrainer.jsx';
@@ -54,6 +54,12 @@ export default function App() {
       )}
 
       <main className={`flex-1 w-full mx-auto px-5 ${onOnboarding ? 'max-w-2xl py-10' : 'max-w-3xl py-10'}`}>
+        {isDemo && (
+          <div className="mb-6 flex items-center gap-2 text-[12.5px] text-ink-soft bg-white border border-line rounded-full px-4 py-2 w-fit mx-auto">
+            <span className="w-1.5 h-1.5 rounded-full bg-jade-400" />
+            Live demo — read-only preview with a baked snapshot. Reviews don’t persist; audio uses your browser’s voice. Full app runs locally with the backend.
+          </div>
+        )}
         {meta?.counts?.units === 0 && (
           <div className="mb-6 p-4 rounded-2xl bg-white border border-line text-ink-soft text-sm">
             No content yet. Run <code className="text-ink">npm run ingest:all</code> to import decks and build units.

@@ -1,5 +1,6 @@
 node_modules/
 dist/
+public/demo/
 .env
 data/app.db
 data/app.db-wal

@@ -1,13 +1,46 @@
+// In a normal build the client talks to the Express API. In the static GitHub Pages
+// demo build (VITE_STATIC=1) there is no backend: GET reads come from a baked JSON
+// snapshot under <base>/demo/, and writes (review/onboarding) are local no-ops.
+const STATIC = import.meta.env.VITE_STATIC === '1';
+const BASE = import.meta.env.BASE_URL || '/';
+
+export const isDemo = STATIC;
+
 async function req(path, opts) {
-  const res = await fetch(path, {
-    headers: { 'content-type': 'application/json' },
-    ...opts,
-  });
+  const res = await fetch(path, { headers: { 'content-type': 'application/json' }, ...opts });
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
   return res.json();
 }
 
-export const api = {
+async function demo(file) {
+  const res = await fetch(`${BASE}demo/${file}`);
+  if (!res.ok) throw new Error(`demo ${file} ${res.status}`);
+  return res.json();
+}
+
+let _dict = null;
+async function demoLookup(term) {
+  if (!_dict) _dict = await demo('dict.json');
+  for (let len = Math.min(term.length, 4); len >= 1; len--) {
+    const sub = term.slice(0, len);
+    if (_dict[sub]?.length) return { term, results: _dict[sub] };
+  }
+  return { term, results: [] };
+}
+
+export const api = STATIC ? {
+  meta: () => demo('meta.json'),
+  home: () => demo('home.json'),
+  session: () => demo('session.json'),
+  review: async () => ({ ok: true, demo: true }),          // no-op in demo
+  stats: () => demo('stats.json'),
+  evaluateThrottle: () => demo('stats.json').then(s => s.throttle),
+  lookup: (term) => demoLookup(term),
+  reading: () => demo('reading.json'),
+  tone: () => demo('tone.json'),
+  onboarding: () => Promise.resolve({ onboarded: true }),
+  saveOnboarding: async () => ({ ok: true, demo: true }),
+} : {
   meta: () => req('/api/meta'),
   home: () => req('/api/home'),
   session: () => req('/api/session'),
@@ -21,4 +54,6 @@ export const api = {
   saveOnboarding: (body) => req('/api/onboarding', { method: 'POST', body: JSON.stringify(body) }),
 };
 
-export const mediaUrl = (path) => (path ? '/media/' + encodeURIComponent(path) : null);
+// Audio: real media is only present with the backend. In the demo, playAudio falls
+// back to speechSynthesis when the media URL 404s.
+export const mediaUrl = (path) => (!path || STATIC ? null : '/media/' + encodeURIComponent(path));
