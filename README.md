@@ -1,5 +1,9 @@
 # 学 · Mandarin Learn
 
+**▶ Live demo:** https://sbhat2026.github.io/mandarin-learn/ — a read-only preview on
+GitHub Pages (baked data snapshot, no backend; reviews don't persist, audio uses the
+browser voice). The full app runs locally with the Node/SQLite backend below.
+
 A local-first Mandarin app for **speaking and reading only** — no handwriting, stroke
 order, or typing characters. It doesn't author language content; it **imports** it.
 Drop in existing Anki decks and open datasets, and the app repackages them into
@@ -211,6 +215,22 @@ data/              app.db + extracted media (gitignored)
 scripts/           db:init / db:reset
 test/              fixtures + tests
 ```
+
+---
+
+## Deploying the demo (GitHub Pages)
+
+The Pages build is a **static, read-only** snapshot — Pages can't run the Express/SQLite
+backend. With a populated `data/app.db`:
+
+```bash
+npm run deploy:pages     # exports a JSON snapshot, builds with base=/mandarin-learn/,
+                         # pushes dist/ to the gh-pages branch
+```
+
+`scripts/export-static.js` bakes the snapshot (`public/demo/*.json`); the client
+(`src/lib/api.js`) reads it when built with `VITE_STATIC=1` and treats reviews as local
+no-ops. Enable Pages once (Settings → Pages → branch `gh-pages`).
 
 ---
 
