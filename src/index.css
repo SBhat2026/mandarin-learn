@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: light; }
+
+html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+body {
+  @apply bg-[#faf9f7] text-ink font-sans tracking-tightish;
+  background-image: radial-gradient(circle at 50% -8%, #ffffff 0%, #faf9f7 42%);
+  min-height: 100vh;
+}
+
+/* Large "hero" hanzi uses a refined CJK serif; inline hanzi stays sans for clarity. */
+.hanzi { @apply font-hanzi; }
+.hanzi-sans { @apply font-hanziSans; }
+
+.card-face { @apply bg-white rounded-3xl shadow-soft border border-line; }
+.hairline { @apply border border-line; }
+
+kbd {
+  @apply inline-flex items-center px-1.5 py-0.5 text-[10px] rounded-md bg-stone-100 border border-line text-ink-soft font-mono;
+}
+
+/* Focus ring in the accent, subtle */
+*:focus-visible { outline: 2px solid theme('colors.jade.400'); outline-offset: 2px; }
+
+::selection { background: theme('colors.jade.100'); }
+
+/* Thin, calm scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #e2ded8; border-radius: 999px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: #cfc9c0; background-clip: content-box; }

@@ -1,0 +1,44 @@
+{
+  "name": "mandarin-learn",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n web,api \"vite\" \"node --watch server/index.js\"",
+    "web": "vite",
+    "api": "node server/index.js",
+    "build": "vite build",
+    "preview": "vite preview",
+    "db:init": "node scripts/init-db.js",
+    "db:reset": "node scripts/reset-db.js",
+    "data:fetch": "bash ingest/tools/fetch-open-data.sh",
+    "data:build-decks": "node ingest/tools/build-open-decks.js",
+    "ingest:apkg": "node ingest/import-apkg.js",
+    "ingest:cedict": "node ingest/import-cedict.js",
+    "ingest:freq": "node ingest/import-frequency.js",
+    "ingest:enrich": "node ingest/enrich.js",
+    "ingest:units": "node ingest/build-units.js",
+    "ingest:all": "node ingest/run-all.js",
+    "dump:units": "node ingest/dump-units.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "ts-fsrs": "^4.7.0",
+    "yauzl": "^3.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.2",
+    "postcss": "^8.5.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.1",
+    "tailwindcss": "^3.4.17",
+    "vite": "^6.0.7"
+  }
+}

@@ -1,0 +1,75 @@
+import { useEffect, useState } from 'react';
+import { Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { api } from './lib/api.js';
+import Home from './pages/Home.jsx';
+import Session from './pages/Session.jsx';
+import ToneTrainer from './pages/ToneTrainer.jsx';
+import Reading from './pages/Reading.jsx';
+import Stats from './pages/Stats.jsx';
+import Onboarding from './pages/Onboarding.jsx';
+
+const tabs = [
+  ['/', 'Home'],
+  ['/session', 'Practice'],
+  ['/tones', 'Tones'],
+  ['/reading', 'Reading'],
+  ['/stats', 'Progress'],
+];
+
+export default function App() {
+  const [meta, setMeta] = useState(null);
+  const navigate = useNavigate();
+  const loc = useLocation();
+
+  useEffect(() => {
+    api.meta().then(m => {
+      setMeta(m);
+      if (!m.onboarding?.onboarded && m.counts.units > 0) navigate('/onboarding');
+    }).catch(() => setMeta({ error: true }));
+  }, []);
+
+  const onOnboarding = loc.pathname === '/onboarding';
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      {!onOnboarding && (
+        <header className="sticky top-0 z-20 bg-[#faf9f7]/85 backdrop-blur-xl border-b border-line">
+          <div className="max-w-3xl mx-auto px-5 h-16 flex items-center">
+            <NavLink to="/" className="flex items-center gap-2.5 mr-6">
+              <span className="hanzi text-[26px] leading-none text-ink">学</span>
+              <span className="text-[13px] font-medium text-ink-faint tracking-wide hidden sm:block">Mandarin</span>
+            </NavLink>
+            <nav className="flex items-center gap-0.5 bg-white/60 rounded-full p-1 border border-line">
+              {tabs.map(([to, label]) => (
+                <NavLink key={to} to={to} end={to === '/'}
+                  className={({ isActive }) =>
+                    `px-3.5 py-1.5 rounded-full text-[13px] font-medium transition-colors ${
+                      isActive ? 'bg-ink text-white shadow-sm' : 'text-ink-soft hover:text-ink'}`}>
+                  {label}
+                </NavLink>
+              ))}
+            </nav>
+          </div>
+        </header>
+      )}
+
+      <main className={`flex-1 w-full mx-auto px-5 ${onOnboarding ? 'max-w-2xl py-10' : 'max-w-3xl py-10'}`}>
+        {meta?.counts?.units === 0 && (
+          <div className="mb-6 p-4 rounded-2xl bg-white border border-line text-ink-soft text-sm">
+            No content yet. Run <code className="text-ink">npm run ingest:all</code> to import decks and build units.
+          </div>
+        )}
+        <div className="animate-fade">
+          <Routes>
+            <Route path="/" element={<Home />} />
+            <Route path="/session" element={<Session />} />
+            <Route path="/tones" element={<ToneTrainer />} />
+            <Route path="/reading" element={<Reading />} />
+            <Route path="/stats" element={<Stats />} />
+            <Route path="/onboarding" element={<Onboarding onDone={() => api.meta().then(setMeta)} />} />
+          </Routes>
+        </div>
+      </main>
+    </div>
+  );
+}

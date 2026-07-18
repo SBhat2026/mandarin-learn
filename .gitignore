@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+data/app.db
+data/app.db-wal
+data/app.db-shm
+data/media/
+ingest/sources/*
+!ingest/sources/.gitkeep
+test/fixtures/
+.DS_Store
