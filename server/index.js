@@ -6,7 +6,10 @@ import { buildSession, buildLesson, submitReview, currentUnit, unitProgress } fr
 import { inferTraits } from './learner.js';
 import { knownWordIds } from './planner.js';
 import { runBackground } from './reasoner.js';
-import { laoshiReply, available as laoshiAvailable } from './qwen.js';
+import { laoshiReply, laoshiLesson, available as laoshiAvailable } from './qwen.js';
+import { buildLessonPlan } from './neighborhood.js';
+import { scheduleFromConversation, detectUsed } from './conversation.js';
+import { scriptDirective } from './learner.js';
 import { fullStats } from './stats.js';
 import { evaluateThrottle } from './scheduler.js';
 import { lookup } from './dictionary.js';
@@ -76,6 +79,40 @@ app.post('/api/review', wrap(async (req, res) => {
   const { cardId, rating, durationMs, targetTone, heardTone, dimension, exercise } = req.body || {};
   if (!cardId || !rating) return res.status(400).json({ error: 'cardId and rating required' });
   const result = await submitReview({ cardId, rating, durationMs, targetTone, heardTone, dimension, exercise });
+  res.json(result);
+}));
+
+// ---- Conversation-driven neighborhood lesson (primary Practice flow) ----
+function knownWordStrings() {
+  const known = [...knownWordIds()];
+  return known.length
+    ? db().prepare(`SELECT hanzi FROM words WHERE id IN (${known.map(() => '?').join(',')}) ORDER BY freq_rank LIMIT 400`).all(...known).map(r => r.hanzi)
+    : [];
+}
+
+// The lesson plan: focal concept + connected neighborhood + instructional families.
+app.get('/api/lesson/plan', wrap((req, res) => {
+  const plan = buildLessonPlan();
+  plan.scriptDirective = scriptDirective(plan.scriptLevel);
+  res.json(plan);
+}));
+
+// One conductor turn from Laoshi within the lesson; reports which targets appeared.
+app.post('/api/lesson/turn', wrap(async (req, res) => {
+  const { plan, history = [], userText = '' } = req.body || {};
+  if (!plan) return res.status(400).json({ error: 'plan required' });
+  const reply = await laoshiLesson({ plan, history, userText, knownWords: knownWordStrings() });
+  const used = detectUsed(reply, plan.targetVocab || []);
+  res.json({ ...reply, used });
+}));
+
+// Finish the lesson: infer understanding from the dialogue, schedule review,
+// and capture the conversation as each concept's examples.
+app.post('/api/lesson/complete', wrap(async (req, res) => {
+  const { plan, transcript = [] } = req.body || {};
+  if (!plan) return res.status(400).json({ error: 'plan required' });
+  const result = await scheduleFromConversation({ plan, transcript });
+  runBackground().catch(() => {});   // refresh the hidden model in the background
   res.json(result);
 }));
 

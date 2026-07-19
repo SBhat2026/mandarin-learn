@@ -182,13 +182,21 @@ Units with no clear theme — typically the highest-frequency function words —
 ## Screens
 
 - **Home** — Duolingo-style vertical unit map, due/new counts, streak
-- **Practice** — an adaptively generated lesson: reviews (weakest dimension each) interleaved
-  with new words. New words open with a **teach-then-test** intro showing their character
-  family (radical + phonetic series peers) and an in-context example, then vary across
-  recognition / listening / reading / pronunciation / cloze / production. Pinyin and hanzi
-  are **tone-colored** throughout. Keyboard: <kbd>space</kbd> reveals, <kbd>1</kbd>–<kbd>4</kbd> grade.
-- **Laoshi** — conversational practice with the Qwen teacher, constrained to your known
-  vocabulary (comprehensible input), with tone-colored replies, audio, and gentle corrections.
+- **Practice** — a conversation-driven concept-acquisition loop, not a flashcard queue:
+  1. **Meet** one focal concept — pronunciation + meaning + pinyin first, hanzi secondary.
+  2. **See how it connects** — instructional character families: what the shared *radical
+     means* (semantic), what the *phonetic component sounds like*, and look-alikes to keep
+     apart. Transferable patterns, not metadata.
+  3. **Talk with Laoshi** — the focal word and its graph neighborhood (collocations, due
+     reviews, related characters) are woven into a live conversation; target words light up
+     as they're used.
+  4. **Connections formed** — understanding is *inferred from the dialogue* (no grade
+     buttons), review is scheduled, and the conversation's own sentences become that word's
+     examples. Script emphasis (pinyin↔hanzi) adapts continuously to reading level, per word.
+
+  Falls back to the flashcard/teach-then-test exercise flow when no teacher model is available.
+- **Laoshi** — free-form conversational practice with the Qwen teacher, constrained to your
+  known vocabulary (comprehensible input), tone-colored replies, audio, gentle corrections.
 - **Tone trainer** — minimal-pair drills from imported audio, per-tone stats
 - **Reading** — sentences from your completed units as read-aloud passages; tap a word
   for a CC-CEDICT popover, tap a sentence to hear it

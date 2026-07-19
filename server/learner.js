@@ -184,3 +184,39 @@ export function inferTraits() {
 export function traits() {
   return getModel('traits', null);
 }
+
+// ---------------------------------------------------------------------------
+// Progressive script exposure. Reading strength grows continuously, so script
+// emphasis shifts from pinyin-primary → balanced → hanzi-primary. This is
+// derived, never chosen by the learner, and adapts at the vocabulary level.
+// ---------------------------------------------------------------------------
+
+// Global reading readiness 0..1 (drives Laoshi's overall pinyin↔hanzi mix).
+export function scriptLevel() {
+  const d = db();
+  const r = d.prepare("SELECT AVG(score) a, COUNT(*) c FROM word_mastery WHERE dimension='reading' AND exposures>0").get();
+  const totalReviews = d.prepare('SELECT COUNT(*) c FROM reviews').get().c;
+  const readingAbility = r.a ?? 0;
+  const experience = Math.min(1, totalReviews / 300);
+  return Math.max(0, Math.min(1, 0.65 * readingAbility + 0.35 * experience));
+}
+
+// Per-word script mode from that word's own reading mastery, so common words go
+// hanzi-first while newer ones stay pinyin-first — no global switch.
+export function scriptMode(wordId) {
+  const row = db().prepare("SELECT score, exposures FROM word_mastery WHERE word_id=? AND dimension='reading'").get(wordId);
+  const s = row?.score ?? 0;
+  if (!row || row.exposures === 0 || s < 0.4) return 'pinyin';   // pinyin primary, hanzi secondary
+  if (s < 0.7) return 'balanced';                                 // both prominent
+  return 'hanzi';                                                 // hanzi primary, pinyin on demand
+}
+
+// Directive injected into Laoshi so its LANGUAGE tracks the learner's level. The
+// output format never changes — the "hanzi" field is always real characters and
+// "pinyin" is always romanization; the UI decides which to emphasize. This
+// directive only controls sentence complexity and reading expectations.
+export function scriptDirective(level = scriptLevel()) {
+  if (level < 0.33) return 'The learner is a beginning reader: use only very simple, high-frequency words and short sentences. They will lean on the pinyin, so keep the characters common.';
+  if (level < 0.66) return 'The learner is building reading ability: use natural everyday language and gradually include less-common characters.';
+  return 'The learner reads well: you may use richer vocabulary and longer sentences, and rely less on pinyin crutches.';
+}

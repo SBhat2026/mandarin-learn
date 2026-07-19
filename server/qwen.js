@@ -68,9 +68,73 @@ function laoshiSystem({ knownWords = [], focusWords = [], scene = 'free chat', l
     'When the learner makes a mistake, model the correct form naturally rather than lecturing.',
     'Ask a simple question most turns to keep them talking. Never switch to being a generic AI assistant; stay in character as their teacher.',
     'ALWAYS respond as strict JSON: {"hanzi": "...", "pinyin": "...", "english": "...", "note": "optional short tip or correction in English"}.',
+    'CRITICAL: "hanzi" MUST be Chinese characters only (never romanization); "pinyin" MUST be the matching romanization.',
     `Scene: ${scene}.`,
     known ? `KNOWN words the learner has studied: ${known}` : 'The learner is a true beginner; use only the most basic words.',
   ].filter(Boolean).join('\n');
+}
+
+// Lesson-conductor system prompt. Laoshi runs a mini-lesson around ONE focal
+// concept and its neighborhood, reusing target vocabulary, surfacing related
+// characters naturally, and adapting its script to the learner's reading level.
+function conductorSystem({ plan, knownWords = [] }) {
+  const target = (plan.targetVocab || []).map(v => `${v.hanzi} (${v.pinyin}) = ${v.gloss}`).join('; ');
+  const focal = plan.focal;
+  const families = (plan.patterns || []).flatMap(p => [p.semantic?.lesson, p.phonetic?.lesson].filter(Boolean)).slice(0, 3);
+  const known = knownWords.slice(0, 300).join(' ');
+  return [
+    'You are 老师 (Lǎoshī), a warm Mandarin teacher running a short, live mini-lesson — NOT a generic assistant.',
+    `Today's focal concept: ${focal.hanzi} (${focal.pinyin}) = ${focal.gloss}.`,
+    target && `Weave these connected words into the conversation naturally, reusing them more than once: ${target}.`,
+    families.length ? `When it fits, reinforce these patterns in passing: ${families.join(' ')}` : '',
+    plan.scriptDirective || 'Write primarily in pinyin with supporting hanzi.',
+    'Comprehensible input: build turns almost entirely from KNOWN words + the target words; introduce at most one new idea per turn and make its meaning obvious.',
+    'Keep every turn SHORT (1–2 sentences) and end most turns with a simple question so the learner keeps talking.',
+    'Model corrections naturally instead of lecturing. Stay fully in character as their teacher.',
+    'ALWAYS respond as strict JSON: {"hanzi":"...","pinyin":"...","english":"...","note":"optional short English tip/correction"}.',
+    'CRITICAL: "hanzi" MUST contain Chinese characters only (never romanization); "pinyin" MUST contain the matching romanization with tone marks. Never put pinyin in the hanzi field.',
+    `Scene: ${plan.scene || 'everyday conversation'}.`,
+    known ? `KNOWN words: ${known}` : 'The learner is a true beginner; use only the most basic words.',
+  ].filter(Boolean).join('\n');
+}
+
+// One conductor turn within a lesson. Returns {hanzi, pinyin, english, note, via}.
+export async function laoshiLesson({ plan, history = [], userText = '', knownWords = [] }) {
+  const messages = [
+    { role: 'system', content: conductorSystem({ plan, knownWords }) },
+    ...history.slice(-10).map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })),
+  ];
+  if (userText) messages.push({ role: 'user', content: userText });
+  return parseTeacher(await chat(messages, { temperature: 0.6, max_tokens: 400 }));
+}
+
+// Extract every top-level {...} object from a string (qwen3 sometimes emits one
+// JSON object per sentence instead of a single reply).
+function extractObjects(text) {
+  const clean = text.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/```json\s*/gi, '').replace(/```/g, '');
+  const objs = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < clean.length; i++) {
+    const ch = clean[i];
+    if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') { if (depth === 0) start = i; depth++; }
+    else if (ch === '}') { depth--; if (depth === 0 && start >= 0) { try { objs.push(JSON.parse(clean.slice(start, i + 1))); } catch {} start = -1; } }
+  }
+  return objs;
+}
+
+function parseTeacher({ text, via }) {
+  const objs = extractObjects(text);
+  if (!objs.length) return { hanzi: (text || '').trim(), pinyin: '', english: '', note: '', via };
+  // Merge multiple sentence-objects into one turn.
+  const merged = objs.reduce((a, o) => ({
+    hanzi: (a.hanzi || '') + (o.hanzi || ''),
+    pinyin: [a.pinyin, o.pinyin].filter(Boolean).join(' '),
+    english: [a.english, o.english].filter(Boolean).join(' '),
+    note: a.note || o.note || '',
+  }), {});
+  return { ...merged, via };
 }
 
 // One teacher turn. Returns {hanzi, pinyin, english, note, via}.
@@ -80,17 +144,5 @@ export async function laoshiReply({ history = [], userText = '', context = {} })
     ...history.slice(-8).map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })),
   ];
   if (userText) messages.push({ role: 'user', content: userText });
-  const { text, via } = await chat(messages, { temperature: 0.6, max_tokens: 400 });
-  let parsed;
-  try {
-    // qwen3 models may emit a <think>…</think> preamble — strip it before parsing.
-    const cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '')
-      .replace(/```json\s*/gi, '').replace(/```/g, '').trim();
-    const start = cleaned.search(/\{/);
-    const end = cleaned.lastIndexOf('}');
-    parsed = JSON.parse(start >= 0 ? cleaned.slice(start, end + 1) : cleaned);
-  } catch {
-    parsed = { hanzi: text.trim(), pinyin: '', english: '', note: '' };
-  }
-  return { ...parsed, via };
+  return parseTeacher(await chat(messages, { temperature: 0.6, max_tokens: 400 }));
 }

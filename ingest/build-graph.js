@@ -50,14 +50,16 @@ function build() {
       if (m.phonetic) ins.run('char', c, 'phonetic_series', 'phonetic', m.phonetic, 1);
     }
 
-    // --- visual confusion: vocab chars sharing a radical and nearly all components ---
+    // --- visual confusion: genuine look-alikes ---
+    // Decomposition similarity alone is noisy (it can't tell 未 from 末), so we
+    // require multi-component chars that share ≥2 components and differ by ≤1,
+    // and we seed the classic beginner confusables curated below.
     const vc = [...vocabChars].filter(c => meta.has(c));
     const compSet = new Map();
     for (const c of vc) {
       let comps = []; try { comps = JSON.parse(meta.get(c).components || '[]'); } catch {}
       compSet.set(c, new Set(comps));
     }
-    // Group by radical to keep the comparison O(group²), not O(n²).
     const byRadical = new Map();
     for (const c of vc) {
       const r = meta.get(c).radical || '?';
@@ -69,16 +71,26 @@ function build() {
         for (let j = i + 1; j < group.length; j++) {
           const a = group[i], b = group[j];
           const A = compSet.get(a), B = compSet.get(b);
+          if (A.size < 2 || B.size < 2) continue;                 // single-component chars → skip
           const inter = [...A].filter(x => B.has(x)).length;
-          const union = new Set([...A, ...B]).size || 1;
-          const sim = inter / union;
-          // Similar shape (share most components) but not identical → easily confused.
-          if (sim >= 0.5 && [...a].length === [...b].length) {
-            ins.run('char', a, 'visual_confusion', 'char', b, sim);
-            ins.run('char', b, 'visual_confusion', 'char', a, sim);
+          const diff = (A.size - inter) + (B.size - inter);
+          if (inter >= 2 && diff <= 1) {                          // share most, differ by ≤1 piece
+            ins.run('char', a, 'visual_confusion', 'char', b, inter);
+            ins.run('char', b, 'visual_confusion', 'char', a, inter);
           }
         }
       }
+    }
+    // Curated classic confusables (subtle stroke differences decomposition misses).
+    const CONFUSE = [
+      ['己', '已', '巳'], ['未', '末'], ['土', '士'], ['天', '夫'], ['大', '太', '犬'],
+      ['日', '曰', '目'], ['人', '入', '八'], ['干', '千'], ['王', '玉', '主'],
+      ['白', '百', '自'], ['木', '本', '术'], ['我', '找'], ['明', '朋'], ['话', '活'],
+      ['买', '卖'], ['右', '石'], ['牛', '午'], ['问', '间'], ['很', '跟'], ['借', '错'],
+      ['休', '体'], ['贝', '见'], ['特', '持'],
+    ];
+    for (const grp of CONFUSE) {
+      for (const a of grp) for (const b of grp) if (a !== b) ins.run('char', a, 'visual_confusion', 'char', b, 3);
     }
 
     // --- sentence dependencies, grammar patterns, collocations ---

@@ -35,6 +35,22 @@ export async function comprehensibleSentences(wordId, n = 2) {
   } catch { return []; }
 }
 
+// Invisible refinement: rate how well each target concept was understood from the
+// lesson dialogue (0..1 per hanzi). Returns null without a key so the heuristic
+// stands alone. This is the "infer understanding through conversation" step.
+export async function llmUnderstanding(transcript, targetVocab) {
+  if (!hasApiKey() || !targetVocab?.length) return null;
+  const convo = transcript.map(t => `${t.role === 'user' ? 'Learner' : 'Laoshi'}: ${t.hanzi || t.content || ''}${t.english ? ' (' + t.english + ')' : ''}`).join('\n');
+  try {
+    const out = await completeJson({
+      system: 'You assess a Mandarin learner from a short lesson dialogue. For each target word, estimate how well the LEARNER understood/used it (0=no evidence, 1=used confidently and correctly). Judge only from the learner\'s turns and how the conversation flowed. Output a JSON object mapping each target hanzi to a number 0..1.',
+      messages: [{ role: 'user', content: `Target words: ${targetVocab.map(v => v.hanzi).join(' ')}\n\nDialogue:\n${convo}` }],
+      max_tokens: 300,
+    });
+    return (out && typeof out === 'object') ? out : null;
+  } catch { return null; }
+}
+
 // Nudge per-dimension retention targets toward a daily time budget. Pure heuristic,
 // invisible to the learner. Gated until enough review history exists.
 export function adaptDimTargets() {
