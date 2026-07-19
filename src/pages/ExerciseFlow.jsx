@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api.js';
 import { Loading } from './Home.jsx';
-import { playAudio, speak, speakSlow, listenOnce, recognitionSupported, normalizeHanzi } from '../lib/speech.js';
+import { playAudio, speak, speakSlow, normalizeHanzi, captureSpoken, spokenCaptureSupported } from '../lib/speech.js';
 import { TonedHanzi, TonedPinyin, TonedSentence } from '../components/Toned.jsx';
 import { TONE_COLORS } from '../lib/tones.js';
 
@@ -57,9 +57,11 @@ export default function ExerciseFlow() {
   const grade = useCallback((rating) => {
     if (!item) return;
     const durationMs = Date.now() - startedAt.current;
+    // Spoken tasks carry the raw capture; the server derives heard-tones,
+    // segmental confusion and fluency from it (invisibly).
+    const spoken = heard?.spoken || null;
     api.review({ cardId: item.cardId, rating, durationMs, dimension: item.dimension,
-      exercise: item.exercise, targetTone: item.tone_pattern || null,
-      heardTone: heard?.tone || null }).catch(() => {});
+      exercise: item.exercise, targetTone: item.tone_pattern || null, spoken }).catch(() => {});
     setDone(d => ({ count: d.count + 1, again: d.again + (rating === 1 ? 1 : 0) }));
     advance();
   }, [item, heard, advance]);
@@ -227,10 +229,13 @@ function ExerciseCard({ item, phase, heard, setHeard, onReveal }) {
           <div className="text-lg text-ink mt-1">{item.gloss || item.english}</div>
           <div className="mt-3"><AudioButtons item={item} /></div>
 
-          {heard && (
+          {heard && heard.transcript && (
             <div className={`mt-4 text-sm ${heard.match ? 'text-emerald-600' : 'text-amber-600'}`}>
-              Heard: <span className="hanzi">{heard.transcript || '—'}</span> {heard.match ? '✓ match' : '≠ target'}
+              Heard: <span className="hanzi">{heard.transcript}</span> {heard.match ? '✓ match' : '≠ target'}
             </div>
+          )}
+          {heard && !heard.transcript && heard.heardVoice && (
+            <div className="mt-4 text-sm text-ink-faint">Got it — listen back and compare 👂</div>
           )}
 
           {item.example && ex !== 'cloze' && (
@@ -258,29 +263,40 @@ function ExerciseCard({ item, phase, heard, setHeard, onReveal }) {
 
 function RecordControl({ item, onHeard }) {
   const [state, setState] = useState('idle');   // idle | listening | error
-  const supported = recognitionSupported();
+  const [level, setLevel] = useState(0);
+  const supported = spokenCaptureSupported();
+  const canSelfGrade = !supported;
+  const expectedSyllables = item.tone_pattern ? String(item.tone_pattern).split('-').length : 1;
 
   const record = async () => {
     if (!supported) { onHeard({ transcript: '', match: false, unsupported: true }); return; }
     setState('listening');
     try {
-      const { transcript } = await listenOnce({ timeoutMs: 6000 });
-      const match = normalizeHanzi(transcript).includes(normalizeHanzi(item.hanzi));
-      onHeard({ transcript, match });
+      const cap = await captureSpoken({ expectedSyllables, timeoutMs: 6000, onLevel: (r) => setLevel(r) });
+      const match = cap.transcript ? normalizeHanzi(cap.transcript).includes(normalizeHanzi(item.hanzi)) : false;
+      // Reveal even when STT heard nothing but the mic captured voice — the
+      // acoustic tone signal still counts.
+      onHeard({
+        transcript: cap.transcript, match, spoken: cap,
+        heardVoice: cap.heardVoice, noText: !cap.transcript,
+      });
     } catch { setState('error'); onHeard({ transcript: '', match: false }); }
   };
+
+  const scale = 1 + Math.min(0.6, level * 6);
 
   return (
     <div className="mt-8">
       <button onClick={record} disabled={state === 'listening'}
+        style={state === 'listening' ? { transform: `scale(${scale})` } : undefined}
         className={`w-20 h-20 rounded-full grid place-items-center text-3xl mx-auto transition ${
-          state === 'listening' ? 'bg-rose-500 text-white animate-pulse' : 'bg-ink text-white hover:opacity-90'}`}>
+          state === 'listening' ? 'bg-rose-500 text-white shadow-lg shadow-rose-200' : 'bg-ink text-white hover:opacity-90'}`}>
         🎤
       </button>
       <div className="mt-3 text-sm text-ink-faint">
         {state === 'listening' ? 'Listening…' : supported ? 'Tap and say it aloud' : 'Speak aloud, then self-grade'}
       </div>
-      {!supported && (
+      {canSelfGrade && (
         <button onClick={() => onHeard({ transcript: '', match: false, unsupported: true })}
           className="mt-3 text-xs text-jade-600 hover:underline">I said it — reveal</button>
       )}

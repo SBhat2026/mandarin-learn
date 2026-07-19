@@ -9,6 +9,7 @@ import { State } from './fsrs.js';
 import { introducedWordIds, knownWordIds, newCandidates } from './planner.js';
 import { cleanGloss } from './exercises.js';
 import { scriptLevel } from './learner.js';
+import { interestWeights } from './interests.js';
 import { SEMANTIC_RADICALS, rhyme, firstReading } from './families.js';
 
 const CJK = /[一-鿿]/;
@@ -122,10 +123,18 @@ function peerKnownCount(rel, dst, known, dueSet) {
 // Pick the focal concept: a new word that maximizes transfer to prior + future.
 function pickFocal(introduced, known, dueSet) {
   const cands = newCandidates(30, introduced);
+  const interests = interestWeights();
+  const interestOf = (id) => {
+    if (!interests.size) return 0;
+    let t = []; try { t = JSON.parse(db().prepare('SELECT topics FROM words WHERE id=?').get(id)?.topics || '[]'); } catch {}
+    let best = 0; for (const topic of t) best = Math.max(best, interests.get(topic) || 0);
+    return best;
+  };
   let best = cands[0], bestScore = -Infinity;
   for (const c of cands) {
     const t = transferScore(c.id, c.hanzi, known, dueSet);
-    const combined = c.score + 1.5 * t;      // concreteness/frequency + transfer
+    // concreteness/frequency + transfer + a nudge toward what the learner enjoys.
+    const combined = c.score + 1.5 * t + 1.2 * interestOf(c.id);
     if (combined > bestScore) { bestScore = combined; best = { ...c, transfer: t }; }
   }
   return best;

@@ -6,8 +6,10 @@ import { db } from './db.js';
 import { State } from './fsrs.js';
 import { createCardsForWord, unlockSentences } from './cards.js';
 import { dailyNew, newWordsStartedToday } from './scheduler.js';
-import { weakestDimension, getStage, computeStage, setStage } from './learner.js';
+import { weakestDimension, getStage, computeStage, setStage, modalityBias, unlockedDimensions } from './learner.js';
 import { buildExercise } from './exercises.js';
+import { weakTone } from './tone.js';
+import { interestWeights } from './interests.js';
 
 const CJK = /[一-鿿]/;
 const chars = (s) => [...(s || '')].filter(ch => CJK.test(ch));
@@ -29,6 +31,10 @@ export function knownWordIds() {
 
 function hasSentence(wordId) {
   return !!db().prepare('SELECT 1 FROM sentences WHERE word_ids LIKE ? LIMIT 1').get(`%${wordId}%`);
+}
+
+function unlockedForPronunciation(wordId) {
+  return unlockedDimensions(wordId, false).includes('pronunciation');
 }
 
 function dueMemoryCards(now) {
@@ -66,10 +72,21 @@ export function newCandidates(limit, introduced) {
     if (m?.phonetic) knownFamilies.add('p:' + m.phonetic);
   }
 
-  const pool = db().prepare(`SELECT w.id, w.hanzi, w.freq_rank, w.hsk_level, w.concrete, w.particle
+  const pool = db().prepare(`SELECT w.id, w.hanzi, w.freq_rank, w.hsk_level, w.concrete, w.particle, w.topics
     FROM words w
     WHERE NOT EXISTS (SELECT 1 FROM cards c WHERE c.item_type='word' AND c.item_id=w.id)
     ORDER BY COALESCE(w.freq_rank, 999999) ASC LIMIT 4000`).all();
+
+  // Inferred interests gently pull relevant vocabulary forward — never so hard
+  // that it overrides comprehensibility/frequency, just enough that lessons feel
+  // personally relevant. Invisible to the learner.
+  const interests = interestWeights();
+  const interestBoost = (topicsJson) => {
+    if (!interests.size) return 0;
+    let t = []; try { t = JSON.parse(topicsJson || '[]'); } catch {}
+    let best = 0; for (const topic of t) best = Math.max(best, interests.get(topic) || 0);
+    return best * 1.4;
+  };
 
   const scored = pool.map(w => {
     const cs = chars(w.hanzi);
@@ -90,7 +107,7 @@ export function newCandidates(limit, introduced) {
     // the learner has words to embed them in.
     const particlePenalty = w.particle ? 6 : 0;
     const score = 3 * (w.concrete ?? 1) + freqBoost + 1.5 * fracKnown
-      + Math.min(2, familyBonus) - levelPenalty - loadPenalty - particlePenalty;
+      + Math.min(2, familyBonus) + interestBoost(w.topics) - levelPenalty - loadPenalty - particlePenalty;
     return { id: w.id, hanzi: w.hanzi, score };
   }).sort((a, b) => b.score - a.score);
 
@@ -140,12 +157,23 @@ export function buildLesson({ now = new Date(), size = 16 } = {}) {
     .map(id => db().prepare(`SELECT * FROM cards WHERE item_type='word' AND item_id=? AND card_type='memory'`).get(id))
     .filter(Boolean);
 
+  // Bias the whole session toward the learner's weakest modality; separately, if
+  // a tone is shaky, steer words that contain it toward a pronunciation rep so the
+  // weakness gets addressed in context rather than in an isolated drill.
+  const bias = modalityBias();
+  const weak = weakTone();
+
   // Build review exercises (weakest unlocked dimension per item).
   const reviewItems = due.slice(0, size).map(card => {
     let dim = 'listening';
     if (card.item_type === 'word') {
-      const w = db().prepare('SELECT particle FROM words WHERE id=?').get(card.item_id);
-      dim = w?.particle ? 'sentence' : weakestDimension(card.item_id, { hasSentence: hasSentence(card.item_id) });
+      const w = db().prepare('SELECT particle, tone_pattern FROM words WHERE id=?').get(card.item_id);
+      if (w?.particle) dim = 'sentence';
+      else {
+        dim = weakestDimension(card.item_id, { hasSentence: hasSentence(card.item_id), bias });
+        const hasWeakTone = weak && w?.tone_pattern && String(w.tone_pattern).split('-').includes(String(weak.tone));
+        if (hasWeakTone && unlockedForPronunciation(card.item_id)) dim = 'pronunciation';
+      }
     }
     return buildExercise({ card, dimension: dim, knownWordIds: known, isNew: false });
   }).filter(Boolean);

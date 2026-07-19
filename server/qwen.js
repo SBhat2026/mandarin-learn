@@ -57,7 +57,7 @@ export async function available() {
 
 // Build the teacher system prompt constrained to the learner's known vocabulary,
 // so every teacher turn is comprehensible input (mostly known + ≤1-2 new items).
-function laoshiSystem({ knownWords = [], focusWords = [], scene = 'free chat', level = 'beginner' }) {
+function laoshiSystem({ knownWords = [], focusWords = [], scene = 'free chat', level = 'beginner', persona = '' }) {
   const known = knownWords.slice(0, 400).join(' ');
   const focus = focusWords.join(' ');
   return [
@@ -65,6 +65,7 @@ function laoshiSystem({ knownWords = [], focusWords = [], scene = 'free chat', l
     'Speak mostly in simple Mandarin the learner can understand. Keep turns SHORT (1–2 sentences).',
     'Comprehensible input rule: build sentences almost entirely from the KNOWN words below; introduce at most one or two new words per turn and make their meaning obvious from context.',
     focus ? `Gently work these target words into the conversation when natural: ${focus}.` : '',
+    persona || '',
     'When the learner makes a mistake, model the correct form naturally rather than lecturing.',
     'Ask a simple question most turns to keep them talking. Never switch to being a generic AI assistant; stay in character as their teacher.',
     'ALWAYS respond as strict JSON: {"hanzi": "...", "pinyin": "...", "english": "...", "note": "optional short tip or correction in English"}.',
@@ -77,7 +78,7 @@ function laoshiSystem({ knownWords = [], focusWords = [], scene = 'free chat', l
 // Lesson-conductor system prompt. Laoshi runs a mini-lesson around ONE focal
 // concept and its neighborhood, reusing target vocabulary, surfacing related
 // characters naturally, and adapting its script to the learner's reading level.
-function conductorSystem({ plan, knownWords = [] }) {
+function conductorSystem({ plan, knownWords = [], persona = '' }) {
   const target = (plan.targetVocab || []).map(v => `${v.hanzi} (${v.pinyin}) = ${v.gloss}`).join('; ');
   const focal = plan.focal;
   const families = (plan.patterns || []).flatMap(p => [p.semantic?.lesson, p.phonetic?.lesson].filter(Boolean)).slice(0, 3);
@@ -87,6 +88,7 @@ function conductorSystem({ plan, knownWords = [] }) {
     `Today's focal concept: ${focal.hanzi} (${focal.pinyin}) = ${focal.gloss}.`,
     target && `Weave these connected words into the conversation naturally, reusing them more than once: ${target}.`,
     families.length ? `When it fits, reinforce these patterns in passing: ${families.join(' ')}` : '',
+    persona || '',
     plan.scriptDirective || 'Write primarily in pinyin with supporting hanzi.',
     'Comprehensible input: build turns almost entirely from KNOWN words + the target words; introduce at most one new idea per turn and make its meaning obvious.',
     'Keep every turn SHORT (1–2 sentences) and end most turns with a simple question so the learner keeps talking.',
@@ -99,9 +101,9 @@ function conductorSystem({ plan, knownWords = [] }) {
 }
 
 // One conductor turn within a lesson. Returns {hanzi, pinyin, english, note, via}.
-export async function laoshiLesson({ plan, history = [], userText = '', knownWords = [] }) {
+export async function laoshiLesson({ plan, history = [], userText = '', knownWords = [], persona = '' }) {
   const messages = [
-    { role: 'system', content: conductorSystem({ plan, knownWords }) },
+    { role: 'system', content: conductorSystem({ plan, knownWords, persona }) },
     ...history.slice(-10).map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })),
   ];
   if (userText) messages.push({ role: 'user', content: userText });
@@ -141,6 +143,7 @@ function parseTeacher({ text, via }) {
 export async function laoshiReply({ history = [], userText = '', context = {} }) {
   const messages = [
     { role: 'system', content: laoshiSystem(context) },
+    // context may carry a persona directive (see index.js).
     ...history.slice(-8).map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })),
   ];
   if (userText) messages.push({ role: 'user', content: userText });

@@ -6,6 +6,7 @@ import { weakTone, buildToneDrill } from './tone.js';
 import { maybeHandleLeech } from './leech.js';
 import { updateMastery, inferTraits } from './learner.js';
 import { buildLesson, refreshStage } from './planner.js';
+import { analyzeSpoken, accuracyToRating, persistPronunciation } from './pronunciation.js';
 
 // The adaptive lesson is the primary session source.
 export { buildLesson };
@@ -114,10 +115,25 @@ export function buildSession({ now = new Date() } = {}) {
 // Persist a review, advance the shared FSRS memory card using the dimension just
 // tested, update that dimension's mastery, refresh the acquisition stage, log
 // telemetry, and trigger leech handling.
-export async function submitReview({ cardId, rating, durationMs, targetTone, heardTone, dimension, exercise }) {
+export async function submitReview({ cardId, rating, durationMs, targetTone, heardTone, dimension, exercise, spoken }) {
   const card = db().prepare('SELECT * FROM cards WHERE id=?').get(cardId);
   if (!card) throw new Error('card not found');
   const now = new Date();
+
+  // Spoken tasks: analyze the utterance server-side (invisible). This yields the
+  // real heard-tone pattern (STT never reports it) plus a hidden accuracy that we
+  // trust over any client-side self-grade when it's available.
+  let analysis = null;
+  if (spoken && card.item_type === 'word' && (exercise === 'pronounce' || exercise === 'production' || dimension === 'pronunciation' || dimension === 'spoken')) {
+    const w = db().prepare('SELECT hanzi, pinyin, tone_pattern FROM words WHERE id=?').get(card.item_id);
+    if (w) {
+      analysis = analyzeSpoken({ targetHanzi: w.hanzi, targetPinyin: w.pinyin, spoken });
+      targetTone = targetTone || analysis.targetTonePattern;
+      heardTone = analysis.heardTonePattern || heardTone;
+      if (analysis.toneSource !== 'none' || analysis.contentMatch) rating = accuracyToRating(analysis.accuracy);
+    }
+  }
+
   const next = applyRating(card, rating, dimension, now);
   const correct = rating >= 3 ? 1 : 0;
 
@@ -134,6 +150,7 @@ export async function submitReview({ cardId, rating, durationMs, targetTone, hea
           VALUES(?,?,?,?,?)`).run(info.lastInsertRowid, dimension, exercise ?? null, correct, durationMs ?? null);
       if (card.item_type === 'word') updateMastery(card.item_id, dimension, rating);
     }
+    if (analysis) persistPronunciation({ wordId: card.item_id, source: 'exercise', analysis });
   });
   tx();
 

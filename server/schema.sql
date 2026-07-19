@@ -174,3 +174,23 @@ CREATE TABLE IF NOT EXISTS review_dims (
   latency_ms INTEGER,
   FOREIGN KEY(review_id) REFERENCES reviews(id)
 );
+
+-- Invisible pronunciation telemetry. One row per spoken attempt that produced
+-- an acoustic/transcript signal. Feeds the hidden learner model (tone, initial &
+-- final confusion matrices, fluency/hesitation/confidence). Never surfaced.
+CREATE TABLE IF NOT EXISTS pron_signals (
+  id           INTEGER PRIMARY KEY,
+  ts           TEXT NOT NULL,
+  word_id      INTEGER,
+  source       TEXT,               -- 'exercise' | 'conversation'
+  tone_source  TEXT,               -- 'acoustic' | 'transcript' | 'none'
+  target_tone  TEXT,
+  heard_tone   TEXT,
+  initial_conf TEXT,               -- JSON array of {target,heard,likely}
+  final_conf   TEXT,               -- JSON array of {target,heard,likely}
+  fluency      REAL,
+  hesitation   REAL,
+  confidence   REAL,
+  accuracy     REAL
+);
+CREATE INDEX IF NOT EXISTS idx_pron_ts ON pron_signals(ts);

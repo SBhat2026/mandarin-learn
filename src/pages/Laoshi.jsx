@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
-import { speak, playAudio, listenOnce, recognitionSupported, normalizeHanzi } from '../lib/speech.js';
+import { speak, playAudio, captureSpoken, spokenCaptureSupported } from '../lib/speech.js';
 import { TonedHanzi, TonedPinyin } from '../components/Toned.jsx';
 
 // Laoshi — a conversational Mandarin teacher (Qwen). Stays within what the learner
@@ -10,7 +10,10 @@ export default function Laoshi() {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState(null);
+  const [listening, setListening] = useState(false);
+  const [level, setLevel] = useState(0);
   const scroller = useRef(null);
+  const canSpeak = spokenCaptureSupported();
 
   useEffect(() => { api.laoshiStatus().then(setStatus).catch(() => setStatus({ available: false })); }, []);
   useEffect(() => {
@@ -34,8 +37,12 @@ export default function Laoshi() {
   }
 
   async function mic() {
-    if (!recognitionSupported()) return;
-    try { const { transcript } = await listenOnce({ timeoutMs: 6000 }); if (transcript) send(transcript); } catch {}
+    if (!canSpeak || listening || busy) return;
+    setListening(true); setLevel(0);
+    try {
+      const cap = await captureSpoken({ expectedSyllables: 2, timeoutMs: 6000, onLevel: setLevel });
+      if (cap.transcript) setInput(cap.transcript);   // confirm/edit, then send
+    } catch {} finally { setListening(false); }
   }
 
   if (status && !status.available) {
@@ -79,16 +86,22 @@ export default function Laoshi() {
         {busy && <div className="text-ink-faint text-sm px-2">老师 is thinking…</div>}
       </div>
 
-      <form onSubmit={(e) => { e.preventDefault(); if (input.trim()) send(input.trim()); }}
-        className="mt-3 flex items-center gap-2">
-        <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Type in Chinese or English…"
-          className="flex-1 px-4 py-3 rounded-full border border-line bg-white focus:outline-none focus:border-ink/40 hanzi" />
-        {recognitionSupported() && (
-          <button type="button" onClick={mic} className="w-12 h-12 rounded-full bg-white border border-line grid place-items-center hover:border-ink/30">🎤</button>
-        )}
-        <button type="submit" disabled={busy || !input.trim()}
-          className="w-12 h-12 rounded-full bg-ink text-white grid place-items-center disabled:opacity-40">↑</button>
-      </form>
+      <div className="mt-3">
+        {listening && <div className="text-center text-sm text-rose-500 mb-2 animate-pulse">Listening… speak now</div>}
+        <form onSubmit={(e) => { e.preventDefault(); if (input.trim()) send(input.trim()); }}
+          className="flex items-center gap-2">
+          {canSpeak && (
+            <button type="button" onClick={mic} disabled={busy}
+              style={listening ? { transform: `scale(${1 + Math.min(0.5, level * 5)})` } : undefined}
+              className={`w-12 h-12 shrink-0 rounded-full grid place-items-center transition ${
+                listening ? 'bg-rose-500 text-white shadow-lg shadow-rose-200' : 'bg-white border border-line hover:border-ink/30'}`}>🎤</button>
+          )}
+          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder={canSpeak ? 'Tap 🎤 to speak, or type…' : 'Type in Chinese or English…'}
+            className="flex-1 px-4 py-3 rounded-full border border-line bg-white focus:outline-none focus:border-ink/40 hanzi" />
+          <button type="submit" disabled={busy || !input.trim()}
+            className="w-12 h-12 shrink-0 rounded-full bg-ink text-white grid place-items-center disabled:opacity-40">↑</button>
+        </form>
+      </div>
     </div>
   );
 }

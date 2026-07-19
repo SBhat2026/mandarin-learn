@@ -7,6 +7,8 @@ import { createCardsForWord } from './cards.js';
 import { submitReview } from './session.js';
 import { updateMastery } from './learner.js';
 import { llmUnderstanding } from './reasoner.js';
+import { bumpInterests } from './interests.js';
+import { analyzeSpoken, persistPronunciation, accuracyToRating } from './pronunciation.js';
 
 const norm = (s = '') => String(s).replace(/[\s\p{P}\p{S}]/gu, '');
 const tonelessPinyin = (s = '') => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]/g, '');
@@ -90,8 +92,39 @@ export async function scheduleFromConversation({ plan, transcript }) {
     outcomes.push({ wordId: v.wordId, hanzi: v.hanzi, produced: s.produced, exposed: s.exposed, understood: Number(score.toFixed(2)), role: v.role });
   }
 
+  // Interests are inferred from what the learner actually engaged with: producing
+  // a word counts more than merely meeting it. (Hidden; steers future lessons.)
+  bumpInterests(outcomes.filter(o => o.produced).map(o => o.wordId), 2);
+  bumpInterests(outcomes.filter(o => !o.produced && o.exposed).map(o => o.wordId), 0.5);
+
   const examples = captureExamples(transcript, targetVocab);
   return { outcomes, examples };
+}
+
+// Invisible pronunciation observation from a single spoken conversation turn.
+// For every target word the learner actually said, analyze the utterance and
+// fold the result into hidden telemetry + pronunciation mastery. Pronunciation
+// thus permeates conversation instead of living in an isolated drill.
+export function observePronunciation({ spoken, targetVocab = [], source = 'conversation' }) {
+  const transcript = spoken?.transcript || '';
+  const said = targetVocab.filter(v => mentions(transcript, null, v).hit);
+  if (!said.length) return { observed: 0 };
+  // Acoustic tones only align to a single word when the whole turn IS ~that word;
+  // otherwise fall back to transcript-derived tones per matched word.
+  const soloUtterance = said.length === 1 && norm(transcript).length <= norm(said[0].hanzi).length + 1;
+  let observed = 0;
+  for (const v of said) {
+    const w = db().prepare('SELECT hanzi, pinyin FROM words WHERE id=?').get(v.wordId);
+    if (!w) continue;
+    const perWord = { ...spoken, heardTones: soloUtterance ? spoken.heardTones : null };
+    const analysis = analyzeSpoken({ targetHanzi: w.hanzi, targetPinyin: w.pinyin, spoken: perWord });
+    persistPronunciation({ wordId: v.wordId, source, analysis });
+    if (analysis.toneSource !== 'none' || analysis.contentMatch) {
+      updateMastery(v.wordId, 'pronunciation', accuracyToRating(analysis.accuracy));
+    }
+    observed++;
+  }
+  return { observed };
 }
 
 // Which target words appeared in a single turn (for live UI chips).

@@ -1,5 +1,6 @@
 // Web Speech API helpers with graceful fallbacks.
 import { mediaUrl } from './api.js';
+import { recordUtterance, classifyTones, pitchSupported } from './pitch.js';
 
 let _audio;
 // Play imported native audio if present, else fall back to speechSynthesis TTS.
@@ -97,4 +98,38 @@ export function listenOnce({ timeoutMs = 6000 } = {}) {
 // Normalize hanzi for comparison (strip spaces/punctuation).
 export function normalizeHanzi(text = '') {
   return String(text).replace(/[\s\p{P}\p{S}]/gu, '');
+}
+
+// True if we can capture *any* spoken signal (transcript OR acoustic pitch).
+export function spokenCaptureSupported() {
+  return !!recognitionSupported() || pitchSupported();
+}
+
+// Capture one spoken attempt for pronunciation analysis. Runs STT and acoustic
+// pitch tracking together on the same utterance, then classifies the tone contour
+// into per-syllable tones. Everything stays on-device. Returns a payload the
+// server folds into the hidden pronunciation model — never a visible score.
+//   { transcript, alternatives, heardTones, timing, onLevel-driven UI hook }
+export async function captureSpoken({ expectedSyllables = 1, timeoutMs = 6000, onLevel } = {}) {
+  // STT (best-effort — may be unsupported or hear nothing).
+  const sttP = recognitionSupported()
+    ? listenOnce({ timeoutMs }).catch(() => ({ transcript: '', alternatives: [] }))
+    : Promise.resolve({ transcript: '', alternatives: [] });
+
+  // Acoustic pitch (best-effort — runs in parallel on a second mic consumer).
+  const pitchP = pitchSupported()
+    ? recordUtterance({ maxMs: Math.min(timeoutMs, 5000), onLevel }).catch(() => null)
+    : Promise.resolve(null);
+
+  const [stt, pitch] = await Promise.all([sttP, pitchP]);
+  const heardTones = pitch?.contour?.length ? classifyTones(pitch.contour, expectedSyllables) : null;
+
+  return {
+    transcript: stt.transcript || '',
+    alternatives: stt.alternatives || [],
+    heardTones,
+    timing: pitch ? { latencyMs: pitch.latencyMs, speechMs: pitch.speechMs, totalMs: pitch.totalMs } : {},
+    heardVoice: !!(pitch?.contour?.length),
+    sttSupported: !!recognitionSupported(),
+  };
 }

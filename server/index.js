@@ -8,8 +8,8 @@ import { knownWordIds } from './planner.js';
 import { runBackground } from './reasoner.js';
 import { laoshiReply, laoshiLesson, available as laoshiAvailable } from './qwen.js';
 import { buildLessonPlan } from './neighborhood.js';
-import { scheduleFromConversation, detectUsed } from './conversation.js';
-import { scriptDirective } from './learner.js';
+import { scheduleFromConversation, detectUsed, observePronunciation } from './conversation.js';
+import { scriptDirective, personaDirective } from './learner.js';
 import { fullStats } from './stats.js';
 import { evaluateThrottle } from './scheduler.js';
 import { lookup } from './dictionary.js';
@@ -76,9 +76,9 @@ app.get('/api/lesson', wrap((req, res) => res.json(buildLesson({ size: Number(re
 app.get('/api/session', wrap((req, res) => res.json(buildSession({}))));
 
 app.post('/api/review', wrap(async (req, res) => {
-  const { cardId, rating, durationMs, targetTone, heardTone, dimension, exercise } = req.body || {};
+  const { cardId, rating, durationMs, targetTone, heardTone, dimension, exercise, spoken } = req.body || {};
   if (!cardId || !rating) return res.status(400).json({ error: 'cardId and rating required' });
-  const result = await submitReview({ cardId, rating, durationMs, targetTone, heardTone, dimension, exercise });
+  const result = await submitReview({ cardId, rating, durationMs, targetTone, heardTone, dimension, exercise, spoken });
   res.json(result);
 }));
 
@@ -101,9 +101,18 @@ app.get('/api/lesson/plan', wrap((req, res) => {
 app.post('/api/lesson/turn', wrap(async (req, res) => {
   const { plan, history = [], userText = '' } = req.body || {};
   if (!plan) return res.status(400).json({ error: 'plan required' });
-  const reply = await laoshiLesson({ plan, history, userText, knownWords: knownWordStrings() });
+  const reply = await laoshiLesson({ plan, history, userText, knownWords: knownWordStrings(), persona: personaDirective().directive });
   const used = detectUsed(reply, plan.targetVocab || []);
   res.json({ ...reply, used });
+}));
+
+// Invisible pronunciation capture from a spoken conversation turn. Matches any
+// target/known words the learner said, analyzes each, and records hidden
+// telemetry + pronunciation mastery. Fire-and-forget from the client.
+app.post('/api/pron/observe', wrap((req, res) => {
+  const { spoken, targetVocab = [], source = 'conversation' } = req.body || {};
+  if (!spoken?.transcript && !spoken?.heardTones) return res.json({ observed: 0 });
+  res.json(observePronunciation({ spoken, targetVocab, source }));
 }));
 
 // Finish the lesson: infer understanding from the dialogue, schedule review,
@@ -130,7 +139,7 @@ app.post('/api/laoshi', wrap(async (req, res) => {
   const knownWords = known.length
     ? db().prepare(`SELECT hanzi FROM words WHERE id IN (${known.map(() => '?').join(',')}) ORDER BY freq_rank LIMIT 400`).all(...known).map(r => r.hanzi)
     : [];
-  const reply = await laoshiReply({ history, userText, context: { knownWords, focusWords: focus, scene: scene || 'friendly practice chat' } });
+  const reply = await laoshiReply({ history, userText, context: { knownWords, focusWords: focus, scene: scene || 'friendly practice chat', persona: personaDirective().directive } });
   res.json(reply);
 }));
 

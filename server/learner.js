@@ -5,6 +5,8 @@
 // schedules WHEN a word returns; these sub-scores pick WHICH exercise to show
 // (always the weakest unlocked dimension) and drive the acquisition stage.
 import { db, DIMENSIONS, getModel, setModel } from './db.js';
+import { weakTone } from './tone.js';
+import { getInterests } from './interests.js';
 
 // Dimensions unlock progressively so early practice stays comprehensible.
 export const RECEPTIVE = ['meaning', 'reading', 'listening'];
@@ -69,18 +71,40 @@ export function unlockedDimensions(wordId, hasSentence) {
 // The single most valuable dimension to practice next for this word:
 // lowest mastery, with an uncertainty bonus (Thompson-ish exploration) and a
 // small recency penalty so we don't drill the same dimension twice in a row.
-export function weakestDimension(wordId, { hasSentence = false, avoid = null } = {}) {
+// `bias` (dimension → additive nudge) lets the planner lean the whole session
+// toward the learner's globally weakest modality without overriding a word's own
+// weakest dimension. Invisible personalization.
+export function weakestDimension(wordId, { hasSentence = false, avoid = null, bias = null } = {}) {
   const m = getMastery(wordId);
+  const unlocked = unlockedDimensions(wordId, hasSentence);
   let best = null, bestNeed = -Infinity;
-  for (const d of unlockedDimensions(wordId, hasSentence)) {
+  for (const d of unlocked) {
     const row = m[d];
     const uncertainty = row.alpha * row.beta / ((row.alpha + row.beta) ** 2 * (row.alpha + row.beta + 1));
     let need = (1 - row.score) + 2.5 * uncertainty;
     if (row.exposures === 0) need += 0.15;        // gentle nudge to cover untested skills
     if (d === avoid) need -= 0.4;
+    if (bias && bias[d]) need += bias[d];
     if (need > bestNeed) { bestNeed = need; best = d; }
   }
   return best || 'meaning';
+}
+
+// The learner's globally weakest modality (from inferred per-dimension ability),
+// as a small bias map to feed weakestDimension. Only meaningful once there's data.
+export function modalityBias() {
+  const t = traits();
+  const ab = t?.dimAbility;
+  if (!ab) return null;
+  const scored = DIMENSIONS
+    .map(d => ({ d, a: ab[d]?.ability }))
+    .filter(x => x.a != null);
+  if (scored.length < 2) return null;
+  scored.sort((a, b) => a.a - b.a);
+  const bias = {};
+  bias[scored[0].d] = 0.2;                          // weakest modality gets a nudge
+  if (scored[1]) bias[scored[1].d] = 0.08;
+  return bias;
 }
 
 // Continuous acquisition stage (0..4). Derived, then persisted for fast reads.
@@ -174,12 +198,43 @@ export function inferTraits() {
     confidence,
     tone,
     modality,
+    pronunciation: pronunciationTraits(),
     // Reading vs listening lean (>0 = stronger reader).
     readingVsListening: (dimAbility.reading.ability ?? 0) - (dimAbility.listening.ability ?? 0),
   };
   setModel('traits', traits);
   return traits;
 }
+
+// Aggregate the invisible pronunciation telemetry into initial/final confusion
+// matrices and mean fluency/hesitation/confidence. Feeds Laoshi + the planner.
+function pronunciationTraits() {
+  const rows = db().prepare(`SELECT tone_source, target_tone, heard_tone, initial_conf, final_conf,
+    fluency, hesitation, confidence, accuracy FROM pron_signals ORDER BY ts DESC LIMIT 300`).all();
+  if (!rows.length) return null;
+  const initials = {}, finals = {}, toneMiss = {};
+  const meanOf = (key) => { const v = rows.map(r => r[key]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+  for (const r of rows) {
+    for (const e of safeArr(r.initial_conf)) { const k = `${e.target}→${e.heard}`; initials[k] = (initials[k] || 0) + 1; }
+    for (const e of safeArr(r.final_conf)) { const k = `${e.target}→${e.heard}`; finals[k] = (finals[k] || 0) + 1; }
+    const tt = String(r.target_tone || '').split('-'), ht = String(r.heard_tone || '').split('-');
+    for (let i = 0; i < tt.length; i++) {
+      const a = tt[i], b = ht[i];
+      if (/^[1-5]$/.test(a) && /^[1-5]$/.test(b) && a !== b) { const k = `${a}→${b}`; toneMiss[k] = (toneMiss[k] || 0) + 1; }
+    }
+  }
+  const top = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([pair, count]) => ({ pair, count }));
+  return {
+    samples: rows.length,
+    initialConfusion: top(initials),
+    finalConfusion: top(finals),
+    toneConfusion: top(toneMiss),
+    fluency: meanOf('fluency'),
+    hesitation: meanOf('hesitation'),
+    confidence: meanOf('confidence'),
+  };
+}
+function safeArr(s) { try { return JSON.parse(s || '[]'); } catch { return []; } }
 
 export function traits() {
   return getModel('traits', null);
@@ -219,4 +274,46 @@ export function scriptDirective(level = scriptLevel()) {
   if (level < 0.33) return 'The learner is a beginning reader: use only very simple, high-frequency words and short sentences. They will lean on the pinyin, so keep the characters common.';
   if (level < 0.66) return 'The learner is building reading ability: use natural everyday language and gradually include less-common characters.';
   return 'The learner reads well: you may use richer vocabulary and longer sentences, and rely less on pinyin crutches.';
+}
+
+// ---------------------------------------------------------------------------
+// Personalization directive for Laoshi. Translates the HIDDEN learner model into
+// behavior guidance the teacher can act on — never into anything the learner sees
+// as a score. Covers confidence/pace, interests, and weak-tone reinforcement.
+// ---------------------------------------------------------------------------
+const TONE_NAME = { 1: 'first (high level)', 2: 'second (rising)', 3: 'third (dipping)', 4: 'fourth (falling)', 5: 'neutral' };
+
+// A couple of words that exercise the learner's weakest tone, for Laoshi to weave
+// in naturally. Prefers words with audio so native pronunciation is available.
+export function weakToneWords(tone, limit = 4) {
+  if (!tone) return [];
+  return db().prepare(`SELECT w.hanzi, w.pinyin FROM words w
+    JOIN cards c ON c.item_type='word' AND c.item_id=w.id AND c.card_type='memory'
+    WHERE w.tone_pattern LIKE ? AND c.state>0
+    ORDER BY COALESCE(w.freq_rank,999999) ASC LIMIT ?`).all(`%${tone}%`, limit).map(r => r.hanzi);
+}
+
+export function personaDirective() {
+  const t = traits();
+  const bits = [];
+
+  const conf = t?.confidence;
+  if (conf != null) {
+    if (conf < 0.45) bits.push('This learner is tentative: be especially warm and encouraging, keep every turn very short, and make replying feel safe and low-stakes.');
+    else if (conf > 0.78) bits.push('This learner is confident: you can gently stretch them with slightly longer replies and a follow-up question.');
+  }
+
+  const interests = getInterests().slice(0, 4).map(i => i.topic).filter(Boolean);
+  if (interests.length) bits.push(`Lean the conversation toward topics they enjoy: ${interests.join(', ')}.`);
+
+  const weak = weakTone();
+  const words = weak ? weakToneWords(weak.tone) : [];
+  if (weak && words.length) {
+    bits.push(`They find the ${TONE_NAME[weak.tone] || weak.tone} tone tricky — naturally reuse words like ${words.join(' ')} so they get gentle extra practice hearing and saying it. Never mention tones or that you are doing this.`);
+  }
+
+  const pron = t?.pronunciation;
+  if (pron?.hesitation != null && pron.hesitation > 0.6) bits.push('They tend to pause before speaking — give them a beat and keep prompts simple and concrete.');
+
+  return { directive: bits.join(' '), interests, weakTone: weak?.tone ?? null };
 }

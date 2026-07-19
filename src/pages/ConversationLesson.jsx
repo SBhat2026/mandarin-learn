@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
-import { playAudio, speak, listenOnce, recognitionSupported, normalizeHanzi } from '../lib/speech.js';
+import { playAudio, speak, normalizeHanzi, captureSpoken, spokenCaptureSupported } from '../lib/speech.js';
 import { TonedHanzi, TonedPinyin, ScriptBubble, scriptModeFromLevel } from '../components/Toned.jsx';
 
 // Practice as a continuous concept-acquisition loop: meet a focal concept, see
@@ -117,16 +117,20 @@ function Talk({ plan, scriptMode, onFinish, onFallback }) {
   const [busy, setBusy] = useState(false);
   const [used, setUsed] = useState(new Set());
   const [learnerCount, setLearnerCount] = useState(0);
+  const [listening, setListening] = useState(false);
+  const [level, setLevel] = useState(0);
   const scroller = useRef(null);
   const opened = useRef(false);
+  const pendingSpoken = useRef(null);       // {transcript, spoken} awaiting confirm/send
   const target = plan.targetVocab || [];
+  const canSpeak = spokenCaptureSupported();
 
   useEffect(() => { if (opened.current) return; opened.current = true; turn('', true); }, []);
   useEffect(() => { scroller.current?.scrollTo(0, scroller.current.scrollHeight); }, [turns, busy]);
 
   function markUsed(ids = []) { if (ids.length) setUsed(u => new Set([...u, ...ids])); }
 
-  async function turn(text, opening = false) {
+  async function turn(text, opening = false, spoken = null) {
     if (busy) return;
     const history = turns.map(t => ({ role: t.role, content: t.role === 'user' ? t.hanzi : (t.hanzi + ' ' + (t.english || '')) }));
     let next = turns;
@@ -137,8 +141,10 @@ function Talk({ plan, scriptMode, onFinish, onFallback }) {
       setLearnerCount(c => c + 1);
       // client-side detection of learner usage for live chips
       markUsed(target.filter(v => normalizeHanzi(text).includes(normalizeHanzi(v.hanzi))).map(v => v.wordId));
+      // Invisible pronunciation observation of the spoken reply (fire-and-forget).
+      if (spoken) api.pronObserve({ spoken: { ...spoken, transcript: text }, targetVocab: target }).catch(() => {});
     }
-    setInput(''); setBusy(true);
+    setInput(''); pendingSpoken.current = null; setBusy(true);
     try {
       const reply = await api.lessonTurn({ plan, history, userText: text });
       if (!reply.hanzi && reply.english?.includes('backend')) { onFallback?.(); return; }
@@ -148,13 +154,29 @@ function Talk({ plan, scriptMode, onFinish, onFallback }) {
     } catch { onFallback?.(); } finally { setBusy(false); }
   }
 
+  // Speak-first: capture voice, drop the transcript into the box for a quick
+  // confirm/edit (so STT slips are fixable), and keep the acoustic capture to
+  // send alongside for hidden pronunciation analysis.
   async function mic() {
-    if (!recognitionSupported()) return;
-    try { const { transcript } = await listenOnce({ timeoutMs: 6000 }); if (transcript) turn(transcript); } catch {}
+    if (!canSpeak || listening || busy) return;
+    setListening(true); setLevel(0);
+    try {
+      const cap = await captureSpoken({ expectedSyllables: 2, timeoutMs: 6000, onLevel: setLevel });
+      const spoken = { transcript: cap.transcript, alternatives: cap.alternatives, heardTones: null, timing: cap.timing };
+      if (cap.transcript) { setInput(cap.transcript); pendingSpoken.current = spoken; }
+    } catch {} finally { setListening(false); }
+  }
+
+  function submitTyped() {
+    const text = input.trim();
+    if (!text) return;
+    const spoken = pendingSpoken.current && pendingSpoken.current.transcript === text ? pendingSpoken.current : null;
+    turn(text, false, spoken);
   }
 
   const transcript = turns;
   window.__lessonTranscript = transcript;   // handed to Wrap via plan closure
+  const micScale = 1 + Math.min(0.5, level * 5);
 
   return (
     <div className="flex flex-col h-[calc(100vh-11rem)] animate-fade">
@@ -179,13 +201,25 @@ function Talk({ plan, scriptMode, onFinish, onFallback }) {
         {busy && <div className="text-ink-faint text-sm px-2">老师…</div>}
       </div>
 
-      <div className="mt-3 flex items-center gap-2">
-        <form onSubmit={(e) => { e.preventDefault(); if (input.trim()) turn(input.trim()); }} className="flex-1 flex items-center gap-2">
-          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Reply in Chinese or English…"
-            className="flex-1 px-4 py-3 rounded-full border border-line bg-white focus:outline-none focus:border-ink/40 hanzi" />
-          {recognitionSupported() && <button type="button" onClick={mic} className="w-12 h-12 rounded-full bg-white border border-line grid place-items-center">🎤</button>}
-          <button type="submit" disabled={busy || !input.trim()} className="w-12 h-12 rounded-full bg-ink text-white grid place-items-center disabled:opacity-40">↑</button>
-        </form>
+      {/* Speak-first input: a prominent mic, with typing as an always-available
+          fallback. Recognized speech lands in the box to confirm or fix. */}
+      <div className="mt-3">
+        {listening && <div className="text-center text-sm text-rose-500 mb-2 animate-pulse">Listening… speak now</div>}
+        <div className="flex items-center gap-2">
+          {canSpeak && (
+            <button type="button" onClick={mic} disabled={busy}
+              style={listening ? { transform: `scale(${micScale})` } : undefined}
+              className={`w-14 h-14 shrink-0 rounded-full grid place-items-center text-2xl transition ${
+                listening ? 'bg-rose-500 text-white shadow-lg shadow-rose-200' : 'bg-ink text-white hover:opacity-90'}`}
+              title="Speak">🎤</button>
+          )}
+          <form onSubmit={(e) => { e.preventDefault(); submitTyped(); }} className="flex-1 flex items-center gap-2">
+            <input value={input} onChange={(e) => { setInput(e.target.value); pendingSpoken.current = null; }}
+              placeholder={canSpeak ? 'Tap 🎤 to speak, or type…' : 'Reply in Chinese or English…'}
+              className="flex-1 px-4 py-3 rounded-full border border-line bg-white focus:outline-none focus:border-ink/40 hanzi" />
+            <button type="submit" disabled={busy || !input.trim()} className="w-12 h-12 shrink-0 rounded-full bg-ink text-white grid place-items-center disabled:opacity-40">↑</button>
+          </form>
+        </div>
       </div>
       <button onClick={onFinish} disabled={learnerCount < 1}
         className="mt-2 text-sm text-ink-soft hover:text-ink disabled:opacity-40 self-center">
