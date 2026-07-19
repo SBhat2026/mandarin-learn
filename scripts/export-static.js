@@ -8,6 +8,8 @@ import { db, initSchema, ROOT } from '../server/db.js';
 import { hydrate } from '../server/cards.js';
 import { lookup } from '../server/dictionary.js';
 import { TOPICS } from '../server/taxonomy.js';
+import { buildExercise } from '../server/exercises.js';
+import { newCandidates } from '../server/planner.js';
 
 initSchema();
 const outDir = process.argv[2] || join(ROOT, 'public', 'demo');
@@ -83,4 +85,12 @@ write('stats.json', {
   throttle: { decision: 'hold', reason: 'Demo preview — start reviewing locally to see your adaptive rate evolve.', previous: 10, current: 10, metrics: { retention: null, avgDailyMinutes: 0, backlogRatio: 0 }, appliedNow: false, nextEvalDue: null },
 });
 write('dict.json', dict);
+
+// Adaptive-practice fallback lesson (the conversation lesson needs a backend, so
+// the demo Practice tab uses the exercise flow: concrete-first teach-then-test).
+const lessonItems = newCandidates(12, new Set())
+  .map((c, i) => buildExercise({ card: { id: 100000 + i, item_type: 'word', item_id: c.id },
+    dimension: 'meaning', knownWordIds: new Set(), isNew: true }))
+  .filter(Boolean);
+write('lesson.json', { items: lessonItems, counts: { due: 0, new: lessonItems.length, dailyNew: 10, newDoneToday: 0 } });
 console.log('Done.');

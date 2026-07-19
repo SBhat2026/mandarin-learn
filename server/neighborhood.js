@@ -57,15 +57,21 @@ export function instructionalPattern(hanzi) {
   for (const c of new Set(chars(hanzi))) {
     const m = db().prepare('SELECT * FROM char_meta WHERE hanzi=?').get(c);
     if (!m) continue;
+    // Peers ordered by character frequency so common, useful examples surface
+    // first (e.g. 时 before 暧昧) instead of obscure characters.
     const peers = (rel, dst) => db().prepare(
       `SELECT ge.src AS ch, cm.pinyin, cm.definition FROM graph_edges ge
          JOIN char_meta cm ON cm.hanzi=ge.src
-        WHERE ge.rel=? AND ge.dst=? AND ge.src!=? LIMIT 5`).all(rel, dst, c)
+         LEFT JOIN words w ON w.hanzi=ge.src
+        WHERE ge.rel=? AND ge.dst=? AND ge.src!=?
+        ORDER BY COALESCE(w.freq_rank, 999999) ASC LIMIT 6`).all(rel, dst, c)
       .map(r => ({ char: r.ch, pinyin: firstReading(r.pinyin), definition: shortDef(r.definition) }));
     const confus = db().prepare(
       `SELECT ge.dst AS ch, cm.pinyin, cm.definition FROM graph_edges ge
          JOIN char_meta cm ON cm.hanzi=ge.dst
-        WHERE ge.rel='visual_confusion' AND ge.src=? LIMIT 4`).all(c)
+         LEFT JOIN words w ON w.hanzi=ge.dst
+        WHERE ge.rel='visual_confusion' AND ge.src=?
+        ORDER BY COALESCE(w.freq_rank, 999999) ASC LIMIT 4`).all(c)
       .map(r => ({ char: r.ch, pinyin: firstReading(r.pinyin), definition: shortDef(r.definition) }));
 
     const p = { char: c, pinyin: firstReading(m.pinyin), definition: shortDef(m.definition) };
