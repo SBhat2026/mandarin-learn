@@ -3,24 +3,43 @@ import { mediaUrl } from './api.js';
 
 let _audio;
 // Play imported native audio if present, else fall back to speechSynthesis TTS.
-export function playAudio({ audio_path, hanzi }) {
+// `slow` slows native playback and uses the slow TTS rate.
+export function playAudio({ audio_path, hanzi }, { slow = false } = {}) {
   const url = mediaUrl(audio_path);
   if (url) {
     try {
       if (_audio) { _audio.pause(); }
       _audio = new Audio(url);
-      _audio.play().catch(() => speak(hanzi));
+      _audio.playbackRate = slow ? 0.7 : 1;
+      _audio.play().catch(() => (slow ? speakSlow(hanzi) : speak(hanzi)));
       return;
     } catch { /* fall through */ }
   }
-  speak(hanzi);
+  slow ? speakSlow(hanzi) : speak(hanzi);
 }
 
+// Rank Mandarin voices: prefer natural/enhanced/cloud voices over the default
+// robotic one. macOS "Tingting"/"Meijia", Google "普通话", Microsoft "Xiaoxiao"
+// are markedly clearer than the fallback compact voice.
+const VOICE_RANK = [
+  /google.*(?:普通话|mandarin|zh)/i,
+  /xiaoxiao|yunxi|yunyang|xiaoyi/i,     // Microsoft neural
+  /tingting|ting-ting|meijia|sinji/i,   // Apple enhanced zh
+  /zh[-_]cn/i,
+  /zh/i,
+];
 let zhVoice = null;
+function allZh() {
+  return (window.speechSynthesis?.getVoices?.() || []).filter(v => /zh|mandarin|chinese/i.test(v.lang + ' ' + v.name));
+}
 function pickVoice() {
   if (zhVoice) return zhVoice;
-  const voices = window.speechSynthesis?.getVoices?.() || [];
-  zhVoice = voices.find(v => /zh[-_]CN/i.test(v.lang)) || voices.find(v => /zh/i.test(v.lang)) || null;
+  const voices = allZh();
+  for (const rx of VOICE_RANK) {
+    const hit = voices.find(v => rx.test(v.name) || rx.test(v.lang));
+    if (hit) { zhVoice = hit; return hit; }
+  }
+  zhVoice = voices[0] || null;
   return zhVoice;
 }
 
@@ -28,16 +47,21 @@ export function ttsSupported() {
   return typeof window !== 'undefined' && 'speechSynthesis' in window;
 }
 
-export function speak(text, { rate = 0.9 } = {}) {
+// Slightly slow default (0.85) so beginners hear each syllable + tone clearly.
+export function speak(text, { rate = 0.85, pitch = 1 } = {}) {
   if (!ttsSupported() || !text) return;
   const u = new SpeechSynthesisUtterance(text);
   u.lang = 'zh-CN';
   u.rate = rate;
+  u.pitch = pitch;
   const v = pickVoice();
   if (v) u.voice = v;
   window.speechSynthesis.cancel();
   window.speechSynthesis.speak(u);
 }
+
+// Deliberately slow, syllable-by-syllable replay for tone drilling.
+export function speakSlow(text) { speak(text, { rate: 0.55 }); }
 
 if (ttsSupported()) {
   window.speechSynthesis.onvoiceschanged = () => { zhVoice = null; pickVoice(); };

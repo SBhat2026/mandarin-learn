@@ -2,7 +2,11 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { db, initSchema, MEDIA_DIR, getSetting } from './db.js';
-import { buildSession, submitReview, currentUnit, unitProgress } from './session.js';
+import { buildSession, buildLesson, submitReview, currentUnit, unitProgress } from './session.js';
+import { inferTraits } from './learner.js';
+import { knownWordIds } from './planner.js';
+import { runBackground } from './reasoner.js';
+import { laoshiReply, available as laoshiAvailable } from './qwen.js';
 import { fullStats } from './stats.js';
 import { evaluateThrottle } from './scheduler.js';
 import { lookup } from './dictionary.js';
@@ -63,14 +67,34 @@ function streak() {
   return n;
 }
 
-// ---- Session ----
+// ---- Adaptive lesson (primary) ----
+app.get('/api/lesson', wrap((req, res) => res.json(buildLesson({ size: Number(req.query.size) || 16 }))));
+// Legacy unit-based session kept for compatibility.
 app.get('/api/session', wrap((req, res) => res.json(buildSession({}))));
 
 app.post('/api/review', wrap(async (req, res) => {
-  const { cardId, rating, durationMs, targetTone, heardTone } = req.body || {};
+  const { cardId, rating, durationMs, targetTone, heardTone, dimension, exercise } = req.body || {};
   if (!cardId || !rating) return res.status(400).json({ error: 'cardId and rating required' });
-  const result = await submitReview({ cardId, rating, durationMs, targetTone, heardTone });
+  const result = await submitReview({ cardId, rating, durationMs, targetTone, heardTone, dimension, exercise });
   res.json(result);
+}));
+
+// Refresh the hidden learner model (invisible; no scores are ever returned to the UI).
+app.post('/api/model/refresh', wrap((req, res) => { inferTraits(); res.json({ ok: true }); }));
+app.post('/api/model/background', wrap(async (req, res) => res.json(await runBackground())));
+
+// ---- Laoshi (Qwen conversational teacher) ----
+app.get('/api/laoshi/status', wrap(async (req, res) => res.json({ available: await laoshiAvailable() })));
+
+app.post('/api/laoshi', wrap(async (req, res) => {
+  const { history = [], userText = '', focus = [], scene } = req.body || {};
+  // Constrain the teacher to what the learner knows (comprehensible input).
+  const known = [...knownWordIds()];
+  const knownWords = known.length
+    ? db().prepare(`SELECT hanzi FROM words WHERE id IN (${known.map(() => '?').join(',')}) ORDER BY freq_rank LIMIT 400`).all(...known).map(r => r.hanzi)
+    : [];
+  const reply = await laoshiReply({ history, userText, context: { knownWords, focusWords: focus, scene: scene || 'friendly practice chat' } });
+  res.json(reply);
 }));
 
 // ---- Stats + throttle ----

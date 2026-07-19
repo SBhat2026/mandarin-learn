@@ -4,6 +4,11 @@ import { hydrate, createCardsForWord, unlockSentences } from './cards.js';
 import { dailyNew, newWordsStartedToday } from './scheduler.js';
 import { weakTone, buildToneDrill } from './tone.js';
 import { maybeHandleLeech } from './leech.js';
+import { updateMastery, inferTraits } from './learner.js';
+import { buildLesson, refreshStage } from './planner.js';
+
+// The adaptive lesson is the primary session source.
+export { buildLesson };
 
 // The current unit = first unit not yet completed (< 80% of its words in review).
 export function currentUnit() {
@@ -22,7 +27,7 @@ export function unitProgress(unit) {
   const row = db().prepare(`
     SELECT COUNT(DISTINCT item_id) c FROM cards
      WHERE item_type='word' AND item_id IN (${placeholders})
-       AND card_type='reading' AND state >= ${State.Review}`).get(...ids);
+       AND card_type='memory' AND state >= ${State.Review}`).get(...ids);
   return { total: ids.length, review: row.c, ratio: row.c / ids.length };
 }
 
@@ -40,7 +45,7 @@ function sentenceUnlocked(itemId) {
   const row = db().prepare(`
     SELECT COUNT(DISTINCT item_id) c FROM cards
       WHERE item_type='word' AND item_id IN (${placeholders})
-        AND card_type='reading' AND state >= ${State.Review}`).get(...ids);
+        AND card_type='memory' AND state >= ${State.Review}`).get(...ids);
   return row.c === ids.length;
 }
 
@@ -106,27 +111,37 @@ export function buildSession({ now = new Date() } = {}) {
   };
 }
 
-// Persist a review, advance FSRS, log tone telemetry, trigger leech handling.
-export async function submitReview({ cardId, rating, durationMs, targetTone, heardTone }) {
+// Persist a review, advance the shared FSRS memory card using the dimension just
+// tested, update that dimension's mastery, refresh the acquisition stage, log
+// telemetry, and trigger leech handling.
+export async function submitReview({ cardId, rating, durationMs, targetTone, heardTone, dimension, exercise }) {
   const card = db().prepare('SELECT * FROM cards WHERE id=?').get(cardId);
   if (!card) throw new Error('card not found');
   const now = new Date();
-  const next = applyRating(card, rating, now);
+  const next = applyRating(card, rating, dimension, now);
+  const correct = rating >= 3 ? 1 : 0;
 
   const tx = db().transaction(() => {
     db().prepare(`UPDATE cards SET due=@due, stability=@stability, difficulty=@difficulty,
         elapsed_days=@elapsed_days, scheduled_days=@scheduled_days, reps=@reps,
-        lapses=@lapses, state=@state, last_review=@last_review WHERE id=@id`)
-      .run({ ...next, id: cardId });
-    db().prepare(`INSERT INTO reviews(card_id, ts, rating, duration_ms, target_tone, heard_tone)
+        lapses=@lapses, state=@state, last_review=@last_review, dimension=@dimension WHERE id=@id`)
+      .run({ ...next, dimension: dimension ?? null, id: cardId });
+    const info = db().prepare(`INSERT INTO reviews(card_id, ts, rating, duration_ms, target_tone, heard_tone)
         VALUES(?,?,?,?,?,?)`)
       .run(cardId, now.toISOString(), rating, durationMs ?? null, targetTone ?? null, heardTone ?? null);
+    if (dimension) {
+      db().prepare(`INSERT INTO review_dims(review_id, dimension, exercise, correct, latency_ms)
+          VALUES(?,?,?,?,?)`).run(info.lastInsertRowid, dimension, exercise ?? null, correct, durationMs ?? null);
+      if (card.item_type === 'word') updateMastery(card.item_id, dimension, rating);
+    }
   });
   tx();
 
+  const stage = refreshStage(card.item_type, card.item_id);
+  try { inferTraits(); } catch {}          // keep the hidden model fresh (cheap, no LLM)
   const updated = db().prepare('SELECT * FROM cards WHERE id=?').get(cardId);
   let leechExamples = null;
   try { leechExamples = await maybeHandleLeech(updated); } catch {}
 
-  return { card: updated, next, leechExamples };
+  return { card: updated, next, leechExamples, stage };
 }

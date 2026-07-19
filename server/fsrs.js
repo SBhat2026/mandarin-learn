@@ -1,15 +1,30 @@
 import { fsrs, createEmptyCard, Rating, State } from 'ts-fsrs';
+import { db, DIM_RETENTION } from './db.js';
 
 export { Rating, State };
 
-const DESIRED_RETENTION = 0.88;
-const scheduler = fsrs({ request_retention: DESIRED_RETENTION });
+// Legacy single-target retention (still exported for the Stats "why").
+export const DESIRED_RETENTION = 0.88;
 
-// Map a DB card row -> ts-fsrs Card object.
+// One scheduler per distinct retention target, built lazily and cached.
+const schedulers = new Map();
+function schedulerForTarget(target) {
+  const key = target.toFixed(3);
+  if (!schedulers.has(key)) schedulers.set(key, fsrs({ request_retention: target }));
+  return schedulers.get(key);
+}
+
+// Live per-dimension target (adaptable — read from dim_retention, seeded fallback).
+export function dimTarget(dimension) {
+  try {
+    const row = db().prepare('SELECT target FROM dim_retention WHERE dimension=?').get(dimension);
+    if (row) return row.target;
+  } catch {}
+  return DIM_RETENTION[dimension] ?? DESIRED_RETENTION;
+}
+
 export function toFsrsCard(row) {
-  if (!row || row.state === 0 || row.due == null) {
-    return createEmptyCard();
-  }
+  if (!row || row.state === 0 || row.due == null) return createEmptyCard();
   return {
     due: new Date(row.due),
     stability: row.stability,
@@ -23,8 +38,11 @@ export function toFsrsCard(row) {
   };
 }
 
-// Given a DB row + rating (1..4), return the updated FSRS fields to persist.
-export function applyRating(row, rating, now = new Date()) {
+// Advance the shared memory card. The interval reflects the dimension just
+// tested: productive skills (0.90) come back sooner than receptive ones (0.84).
+export function applyRating(row, rating, dimension = null, now = new Date()) {
+  const target = dimension ? dimTarget(dimension) : DESIRED_RETENTION;
+  const scheduler = schedulerForTarget(target);
   const card = toFsrsCard(row);
   const scheduled = scheduler.repeat(card, now);
   const next = scheduled[rating].card;
@@ -40,5 +58,3 @@ export function applyRating(row, rating, now = new Date()) {
     last_review: (next.last_review ?? now).toISOString(),
   };
 }
-
-export { DESIRED_RETENTION };

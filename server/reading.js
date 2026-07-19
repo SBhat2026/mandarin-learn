@@ -5,7 +5,7 @@ import { State } from './fsrs.js';
 function learnedWordIds() {
   return new Set(db().prepare(`
     SELECT DISTINCT item_id FROM cards
-    WHERE item_type='word' AND card_type='reading' AND state >= ${State.Review}`).all().map(r => r.item_id));
+    WHERE item_type='word' AND card_type='memory' AND state >= ${State.Review}`).all().map(r => r.item_id));
 }
 
 // Assemble short read-aloud passages from sentences whose words are all learned.

@@ -19,6 +19,8 @@
     "ingest:cedict": "node ingest/import-cedict.js",
     "ingest:freq": "node ingest/import-frequency.js",
     "ingest:enrich": "node ingest/enrich.js",
+    "ingest:meta": "node ingest/backfill-meta.js",
+    "ingest:graph": "node ingest/build-graph.js",
     "ingest:units": "node ingest/build-units.js",
     "ingest:all": "node ingest/run-all.js",
     "dump:units": "node ingest/dump-units.js",

@@ -7,10 +7,12 @@ import ToneTrainer from './pages/ToneTrainer.jsx';
 import Reading from './pages/Reading.jsx';
 import Stats from './pages/Stats.jsx';
 import Onboarding from './pages/Onboarding.jsx';
+import Laoshi from './pages/Laoshi.jsx';
 
 const tabs = [
   ['/', 'Home'],
   ['/session', 'Practice'],
+  ['/laoshi', 'Laoshi'],
   ['/tones', 'Tones'],
   ['/reading', 'Reading'],
   ['/stats', 'Progress'],
@@ -69,6 +71,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/session" element={<Session />} />
+            <Route path="/laoshi" element={<Laoshi />} />
             <Route path="/tones" element={<ToneTrainer />} />
             <Route path="/reading" element={<Reading />} />
             <Route path="/stats" element={<Stats />} />

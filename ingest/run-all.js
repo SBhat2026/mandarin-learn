@@ -20,6 +20,8 @@ run('import-apkg.js', yes ? ['--yes'] : []);
 run('import-cedict.js');
 run('import-frequency.js');
 run('enrich.js', ['--sentences']);
+run('backfill-meta.js');    // POS / HSK level / concreteness / particle + char_meta
+run('build-graph.js');      // knowledge graph edges (families, phonetic series, collocations)
 run('build-units.js', topics ? ['--topics', topics] : []);
 run('dump-units.js');
 console.log('\nPipeline complete.');

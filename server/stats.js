@@ -9,7 +9,7 @@ export function wordsByState() {
   const rows = db().prepare(`
     SELECT COALESCE(c.state, -1) st, COUNT(DISTINCT w.id) c
     FROM words w
-    LEFT JOIN cards c ON c.item_type='word' AND c.item_id=w.id AND c.card_type='reading'
+    LEFT JOIN cards c ON c.item_type='word' AND c.item_id=w.id AND c.card_type='memory'
     GROUP BY st`).all();
   const out = { unseen: 0, new: 0, learning: 0, review: 0, relearning: 0 };
   for (const r of rows) {

@@ -6,11 +6,41 @@ browser voice). The full app runs locally with the Node/SQLite backend below.
 
 A local-first Mandarin app for **speaking and reading only** — no handwriting, stroke
 order, or typing characters. It doesn't author language content; it **imports** it.
-Drop in existing Anki decks and open datasets, and the app repackages them into
-topic-based units, an adaptive spaced-repetition schedule, and speech practice.
+It is not a flashcard app: it is an **intelligent curriculum generator and adaptive
+teacher**. It ingests existing Anki decks + open datasets and turns them into a
+knowledge graph, then continuously infers a hidden learner model to decide what to
+teach and test next — maximizing usable Mandarin per hour of study.
 
 Everything lives in a single SQLite database (`./data/app.db`) — nothing in browser
 storage — so the whole thing can later be wrapped in Tauri.
+
+### The adaptive engine (how it thinks)
+
+- **Knowledge graph, not isolated cards.** `ingest:graph` links words + characters by
+  shared characters, radical families (semantic), phonetic series (sound), visual
+  confusion, collocations, topics, and sentence dependencies. Teaching order, new-word
+  selection, and family teaching all read these edges.
+- **Six-dimensional mastery.** Each word tracks independent sub-scores for *meaning,
+  reading, listening, pronunciation, spoken usage,* and *sentence comprehension*. A
+  single FSRS "memory" card schedules **when** a word returns; the weakest unlocked
+  dimension decides **which** exercise to show. Reviews are generated dynamically
+  (recognition / listening / pronunciation / reading / cloze / production).
+- **Continuous acquisition stages** (first-exposure → familiar → recall → functional →
+  automatic), never a binary known/unknown.
+- **Concrete-first, comprehensible input.** New words are ranked by frequency +
+  concreteness + how many of their characters/families the learner already knows. Bare
+  grammar particles (的, 了, 吗…) are taught **in context** (cloze), never as isolated
+  cards. Character families (radical + phonetic series) are taught together so learning
+  one character transfers to many.
+- **Hidden learner model.** The learner never sees scores or diagnostics. `server/learner.js`
+  silently infers ability per dimension, learning rate, forgetting rate, confidence
+  calibration, tone tendencies, and modality preference from observed behavior.
+- **Two models, clear roles.** *Laoshi* (Qwen, local via Ollama with a DashScope
+  fallback) is the **visible teacher** — it converses within your known vocabulary,
+  corrects gently, and keeps you talking. *Claude* is the **invisible engine**
+  (`server/reasoner.js`): it analyzes behavior, generates comprehensible examples,
+  flags misconceptions, and tunes scheduling to a time budget. The learner talks only
+  to Laoshi.
 
 ---
 
@@ -152,11 +182,13 @@ Units with no clear theme — typically the highest-frequency function words —
 ## Screens
 
 - **Home** — Duolingo-style vertical unit map, due/new counts, streak
-- **Session** — due reviews first, then new words from the current unit
-  - *Listening:* audio → recall meaning → reveal → grade
-  - *Reading:* hanzi → say aloud + recall → reveal + audio → self-grade
-  - *Speaking:* English prompt → speak → transcript vs target; match pre-selects "Good"
-  - Keyboard: <kbd>space</kbd> reveals, <kbd>1</kbd>–<kbd>4</kbd> grade
+- **Practice** — an adaptively generated lesson: reviews (weakest dimension each) interleaved
+  with new words. New words open with a **teach-then-test** intro showing their character
+  family (radical + phonetic series peers) and an in-context example, then vary across
+  recognition / listening / reading / pronunciation / cloze / production. Pinyin and hanzi
+  are **tone-colored** throughout. Keyboard: <kbd>space</kbd> reveals, <kbd>1</kbd>–<kbd>4</kbd> grade.
+- **Laoshi** — conversational practice with the Qwen teacher, constrained to your known
+  vocabulary (comprehensible input), with tone-colored replies, audio, and gentle corrections.
 - **Tone trainer** — minimal-pair drills from imported audio, per-tone stats
 - **Reading** — sentences from your completed units as read-aloud passages; tap a word
   for a CC-CEDICT popover, tap a sentence to hear it
@@ -184,8 +216,17 @@ Units with no clear theme — typically the highest-frequency function words —
 
 ## Data model (SQLite)
 
-`words` · `sentences` · `units` · `cards` (FSRS fields) · `reviews` · `dictionary` ·
-`frequency` · `settings` · `enrichment_cache`. See `server/schema.sql`.
+`words` · `sentences` · `units` · `cards` (single FSRS "memory" track per item) ·
+`reviews` · `review_dims` · `dictionary` · `frequency` · `settings` ·
+`enrichment_cache`. Adaptive engine tables: `char_meta` (decomposition, radical,
+phonetic) · `graph_edges` (knowledge graph) · `word_mastery` (6 dimensions) ·
+`acquisition` (stage) · `learner_model` (hidden, inferred) · `dim_retention`
+(per-dimension FSRS targets). See `server/schema.sql`.
+
+**Qwen / Laoshi setup.** Laoshi uses a local Qwen model via [Ollama](https://ollama.com):
+`ollama pull qwen3.5` (override with `QWEN_MODEL`, default `qwen3.5:latest`). With no
+local model it falls back to Alibaba DashScope if `DASHSCOPE_API_KEY` is set. The core
+review flow never needs either.
 
 ---
 

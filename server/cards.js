@@ -1,8 +1,12 @@
 import { db } from './db.js';
 import { State } from './fsrs.js';
 
-export const WORD_CARD_TYPES = ['listening', 'reading', 'speaking'];
-export const SENTENCE_CARD_TYPES = ['listening', 'reading'];
+// A single FSRS "memory" track schedules each item; the exercise dimension
+// (meaning/reading/listening/pronunciation/spoken/sentence) is chosen at runtime
+// by the planner from the word's weakest unlocked mastery dimension.
+export const MEMORY = 'memory';
+export const WORD_CARD_TYPES = [MEMORY];
+export const SENTENCE_CARD_TYPES = [MEMORY];
 
 const insertCard = () => db().prepare(
   `INSERT OR IGNORE INTO cards(item_type, item_id, card_type, state) VALUES(?,?,?,0)`);
@@ -21,11 +25,12 @@ export function wordHasCards(wordId) {
   return !!db().prepare(`SELECT 1 FROM cards WHERE item_type='word' AND item_id=? LIMIT 1`).get(wordId);
 }
 
-// A word is "learned enough" when its listening+reading are in review state.
+// A word is "learned enough" (for sentence unlocking) once its memory card has
+// reached FSRS review state.
 export function wordInReview(wordId) {
   const row = db().prepare(
     `SELECT MIN(state) m, COUNT(*) c FROM cards
-       WHERE item_type='word' AND item_id=? AND card_type IN ('listening','reading')`).get(wordId);
+       WHERE item_type='word' AND item_id=? AND card_type='memory'`).get(wordId);
   return row.c >= 1 && row.m >= State.Review;
 }
 
