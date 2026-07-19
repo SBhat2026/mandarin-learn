@@ -2,6 +2,7 @@
 // activity payload the client renders. Reviews are generated dynamically (varied
 // by the learner's weakest dimension) rather than a single fixed flashcard.
 import { db } from './db.js';
+import { SEMANTIC_RADICALS, rhyme, firstReading } from './families.js';
 
 const CJK = /[一-鿿]/;
 const chars = (s) => [...(s || '')].filter(ch => CJK.test(ch));
@@ -80,18 +81,30 @@ export function charFamilies(hanzi) {
   for (const c of new Set(chars(hanzi))) {
     const m = db().prepare('SELECT * FROM char_meta WHERE hanzi=?').get(c);
     if (!m) { out.push({ char: c }); continue; }
+    // Frequency-ordered peers (common examples first).
     const peers = (rel, dst) => db().prepare(
-      `SELECT DISTINCT src FROM graph_edges WHERE rel=? AND dst=? AND src!=? LIMIT 6`
-    ).all(rel, dst, c).map(r => r.src);
+      `SELECT ge.src AS ch, cm.pinyin FROM graph_edges ge
+         JOIN char_meta cm ON cm.hanzi=ge.src LEFT JOIN words w ON w.hanzi=ge.src
+        WHERE ge.rel=? AND ge.dst=? AND ge.src!=?
+        ORDER BY COALESCE(w.freq_rank,999999) ASC LIMIT 6`).all(rel, dst, c);
     let comps = []; try { comps = JSON.parse(m.components || '[]'); } catch {}
+    // Semantic family only for meaning-bearing radicals; sound family only when
+    // the phonetic component actually predicts this character's reading.
+    const radMeaning = m.radical ? SEMANTIC_RADICALS[m.radical] : null;
+    const radicalPeers = radMeaning ? peers('radical_family', m.radical).map(r => r.ch) : [];
+    const cRhyme = rhyme(firstReading(m.pinyin));
+    const phoneticPeers = m.phonetic
+      ? peers('phonetic_series', m.phonetic).filter(r => r.pinyin && rhyme(firstReading(r.pinyin)) === cRhyme).map(r => r.ch)
+      : [];
     out.push({
       char: c,
       definition: m.definition,
       radical: m.radical,
+      radicalMeaning: radMeaning,
       components: comps,
-      radicalPeers: m.radical ? peers('radical_family', m.radical) : [],
-      phoneticPeers: m.phonetic ? peers('phonetic_series', m.phonetic) : [],
-      phonetic: m.phonetic,
+      radicalPeers,
+      phoneticPeers: phoneticPeers.length >= 2 ? phoneticPeers : [],
+      phonetic: phoneticPeers.length >= 2 ? m.phonetic : null,
     });
   }
   return out;

@@ -166,8 +166,7 @@ function CharCard({ f }) {
       <div className="flex-1 text-sm">
         {f.definition && <div className="text-ink">{f.definition}</div>}
         <div className="text-ink-faint text-[12px] mt-1 space-y-0.5">
-          {f.radical && <div>Radical <span className="hanzi text-ink-soft">{f.radical}</span>
-            {f.radicalPeers?.length ? <span> · family: <span className="hanzi text-ink-soft">{f.radicalPeers.join(' ')}</span></span> : null}</div>}
+          {f.radicalMeaning && f.radicalPeers?.length ? <div>Radical <span className="hanzi text-ink-soft">{f.radical}</span> means "{f.radicalMeaning}" · <span className="hanzi text-ink-soft">{f.radicalPeers.join(' ')}</span></div> : null}
           {f.phonetic && f.phoneticPeers?.length ? <div>Sound series <span className="hanzi text-ink-soft">{f.phonetic}</span>: <span className="hanzi text-ink-soft">{f.phoneticPeers.join(' ')}</span></div> : null}
           {f.components?.length ? <div>Built from <span className="hanzi text-ink-soft">{f.components.join(' ')}</span></div> : null}
         </div>
