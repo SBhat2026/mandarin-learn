@@ -247,13 +247,23 @@ export function traits() {
 // ---------------------------------------------------------------------------
 
 // Global reading readiness 0..1 (drives Laoshi's overall pinyin↔hanzi mix).
+// Beginners start firmly in pinyin: hanzi is phased in only as the learner
+// actually reads a BREADTH of characters, not because a handful score high.
+// A few well-known words can't jump the level — you need ~250 solidly-read
+// words before hanzi becomes primary, so the transition is gradual and earned.
 export function scriptLevel() {
   const d = db();
-  const r = d.prepare("SELECT AVG(score) a, COUNT(*) c FROM word_mastery WHERE dimension='reading' AND exposures>0").get();
-  const totalReviews = d.prepare('SELECT COUNT(*) c FROM reviews').get().c;
-  const readingAbility = r.a ?? 0;
-  const experience = Math.min(1, totalReviews / 300);
-  return Math.max(0, Math.min(1, 0.65 * readingAbility + 0.35 * experience));
+  // Words the learner can genuinely read (solid score, seen more than once).
+  const readWords = d.prepare(
+    "SELECT COUNT(*) c FROM word_mastery WHERE dimension='reading' AND score>0.6 AND exposures>=2"
+  ).get().c;
+  const abilityRow = d.prepare(
+    "SELECT AVG(score) a FROM word_mastery WHERE dimension='reading' AND exposures>0"
+  ).get();
+  const breadth = Math.min(1, readWords / 250);       // 0 until real reading history
+  const ability = abilityRow.a ?? 0;
+  // Breadth gates everything; ability only modulates within what breadth allows.
+  return Math.max(0, Math.min(1, breadth * (0.5 + 0.5 * ability)));
 }
 
 // Per-word script mode from that word's own reading mastery, so common words go

@@ -37,11 +37,13 @@ export function TonedSentence({ hanzi, pinyin, className = '', size = 'text-3xl'
 //   'hanzi'    → hanzi primary, pinyin faded (revealed on hover)
 export function ScriptBubble({ hanzi, pinyin, english, mode = 'pinyin', hanziSize = 'text-2xl' }) {
   if (mode === 'pinyin') {
+    // Beginner hierarchy: pinyin is the primary text, English supports it, and
+    // hanzi is present but minimal — a faint reference that grows in later modes.
     return (
       <div>
-        <div className="text-lg font-medium"><TonedPinyin pinyin={pinyin} /></div>
-        <div className="hanzi text-[15px] text-ink-faint mt-0.5">{hanzi}</div>
-        {english && <div className="text-sm text-ink-soft mt-1">{english}</div>}
+        <div className="text-2xl font-medium leading-snug"><TonedPinyin pinyin={pinyin} /></div>
+        {english && <div className="text-[15px] text-ink-soft mt-1">{english}</div>}
+        {hanzi && <div className="hanzi text-[13px] text-ink-faint/70 mt-1.5">{hanzi}</div>}
       </div>
     );
   }

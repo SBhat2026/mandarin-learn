@@ -9,7 +9,7 @@ import { runBackground } from './reasoner.js';
 import { laoshiReply, laoshiLesson, available as laoshiAvailable } from './qwen.js';
 import { buildLessonPlan } from './neighborhood.js';
 import { scheduleFromConversation, detectUsed, observePronunciation } from './conversation.js';
-import { scriptDirective, personaDirective } from './learner.js';
+import { scriptDirective, personaDirective, scriptLevel } from './learner.js';
 import { fullStats } from './stats.js';
 import { evaluateThrottle } from './scheduler.js';
 import { lookup } from './dictionary.js';
@@ -130,7 +130,7 @@ app.post('/api/model/refresh', wrap((req, res) => { inferTraits(); res.json({ ok
 app.post('/api/model/background', wrap(async (req, res) => res.json(await runBackground())));
 
 // ---- Laoshi (Qwen conversational teacher) ----
-app.get('/api/laoshi/status', wrap(async (req, res) => res.json({ available: await laoshiAvailable() })));
+app.get('/api/laoshi/status', wrap(async (req, res) => res.json({ available: await laoshiAvailable(), scriptLevel: scriptLevel() })));
 
 app.post('/api/laoshi', wrap(async (req, res) => {
   const { history = [], userText = '', focus = [], scene } = req.body || {};

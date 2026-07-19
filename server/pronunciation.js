@@ -66,6 +66,25 @@ export function pinyinForHanzi(hanzi = '') {
   return out.join(' ');
 }
 
+// Rough English gloss for a hanzi string, used only as a fallback when the
+// teacher model forgets to include one — a beginner should never see a reply
+// with no English at all. Prefers a whole-word gloss, else joins per-word/char
+// meanings with a middot. Not a fluent translation; just a meaning scaffold.
+export function glossForHanzi(hanzi = '') {
+  const h = normalizeHanzi(hanzi);
+  if (!h) return '';
+  const whole = db().prepare('SELECT gloss FROM words WHERE hanzi=? AND gloss IS NOT NULL').get(h);
+  if (whole?.gloss) return whole.gloss;
+  const out = [];
+  for (const ch of h) {
+    const w = db().prepare('SELECT gloss FROM words WHERE hanzi=? AND gloss IS NOT NULL').get(ch);
+    if (w?.gloss) { out.push(w.gloss.split(/[;,]/)[0].trim()); continue; }
+    const d = db().prepare('SELECT definitions FROM dictionary WHERE simplified=? LIMIT 1').get(ch);
+    if (d?.definitions) { try { const defs = JSON.parse(d.definitions); if (defs[0]) out.push(String(defs[0]).trim()); } catch {} }
+  }
+  return out.filter(Boolean).join(' · ');
+}
+
 // ---------------------------------------------------------------------------
 // The analysis. Pure aside from the dictionary lookups above.
 // ---------------------------------------------------------------------------

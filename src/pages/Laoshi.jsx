@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { speak, playAudio, captureSpoken, spokenCaptureSupported } from '../lib/speech.js';
-import { TonedHanzi, TonedPinyin } from '../components/Toned.jsx';
+import { ScriptBubble, scriptModeFromLevel } from '../components/Toned.jsx';
 
 // Laoshi — a conversational Mandarin teacher (Qwen). Stays within what the learner
 // knows, corrects gently, keeps them talking. Not a general assistant.
@@ -14,6 +14,7 @@ export default function Laoshi() {
   const [level, setLevel] = useState(0);
   const scroller = useRef(null);
   const canSpeak = spokenCaptureSupported();
+  const scriptMode = scriptModeFromLevel(status?.scriptLevel);
 
   useEffect(() => { api.laoshiStatus().then(setStatus).catch(() => setStatus({ available: false })); }, []);
   useEffect(() => {
@@ -74,10 +75,8 @@ export default function Laoshi() {
             <div key={i} className="flex justify-start">
               <div className="max-w-[85%] px-4 py-3 rounded-2xl rounded-bl-md bg-white border border-line">
                 {m.hanzi && <div onClick={() => speak(m.hanzi)} className="cursor-pointer">
-                  <TonedHanzi hanzi={m.hanzi} pinyin={m.pinyin} size="text-2xl" />
+                  <ScriptBubble hanzi={m.hanzi} pinyin={m.pinyin} english={m.english} mode={scriptMode} />
                 </div>}
-                {m.pinyin && <div className="mt-1"><TonedPinyin pinyin={m.pinyin} className="text-sm" /></div>}
-                {m.english && <div className="text-sm text-ink-soft mt-1">{m.english}</div>}
                 {m.note && <div className="text-[12px] text-jade-600 mt-2 border-t border-line pt-2">💡 {m.note}</div>}
                 {m.hanzi && <button onClick={() => playAudio({ hanzi: m.hanzi })} className="mt-2 text-xs text-ink-faint hover:text-ink">🔊 replay</button>}
               </div>

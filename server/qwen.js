@@ -4,6 +4,14 @@
 // is prompted to behave as a patient teacher who converses within the learner's
 // known vocabulary, corrects gently, and reinforces prior material.
 import 'dotenv/config';
+import { pinyinForHanzi, glossForHanzi } from './pronunciation.js';
+
+// Keep only Chinese characters (+ CJK punctuation) in the hanzi field, so a
+// non-JSON model reply never leaks pinyin/English into the spoken text or the
+// hanzi bubble. TTS then reads the Mandarin once — nothing else.
+function cjkOnly(s = '') {
+  return String(s).replace(/[^㐀-鿿　-〿＀-￯]/g, '').trim();
+}
 
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.QWEN_MODEL || 'qwen3.5:latest';
@@ -70,6 +78,7 @@ function laoshiSystem({ knownWords = [], focusWords = [], scene = 'free chat', l
     'Ask a simple question most turns to keep them talking. Never switch to being a generic AI assistant; stay in character as their teacher.',
     'ALWAYS respond as strict JSON: {"hanzi": "...", "pinyin": "...", "english": "...", "note": "optional short tip or correction in English"}.',
     'CRITICAL: "hanzi" MUST be Chinese characters only (never romanization); "pinyin" MUST be the matching romanization.',
+    'The learner leans on pinyin and English — EVERY reply MUST include full pinyin with tone marks AND a natural English translation. Never leave them empty.',
     `Scene: ${scene}.`,
     known ? `KNOWN words the learner has studied: ${known}` : 'The learner is a true beginner; use only the most basic words.',
   ].filter(Boolean).join('\n');
@@ -95,6 +104,9 @@ function conductorSystem({ plan, knownWords = [], persona = '' }) {
     'Model corrections naturally instead of lecturing. Stay fully in character as their teacher.',
     'ALWAYS respond as strict JSON: {"hanzi":"...","pinyin":"...","english":"...","note":"optional short English tip/correction"}.',
     'CRITICAL: "hanzi" MUST contain Chinese characters only (never romanization); "pinyin" MUST contain the matching romanization with tone marks. Never put pinyin in the hanzi field.',
+    (plan.scriptLevel ?? 0) < 0.5
+      ? 'The learner CANNOT read hanzi yet — they rely on pinyin and English. EVERY reply MUST include full pinyin with tone marks AND a natural English translation. Never leave "pinyin" or "english" empty.'
+      : 'Always fill "pinyin" and "english"; the learner may still lean on them.',
     `Scene: ${plan.scene || 'everyday conversation'}.`,
     known ? `KNOWN words: ${known}` : 'The learner is a true beginner; use only the most basic words.',
   ].filter(Boolean).join('\n');
@@ -128,7 +140,12 @@ function extractObjects(text) {
 
 function parseTeacher({ text, via }) {
   const objs = extractObjects(text);
-  if (!objs.length) return { hanzi: (text || '').trim(), pinyin: '', english: '', note: '', via };
+  // No JSON at all: salvage just the Chinese so the bubble/TTS stay clean, and
+  // synthesize pinyin from it (English can't be recovered, but pinyin can).
+  if (!objs.length) {
+    const hanzi = cjkOnly(text);
+    return { hanzi, pinyin: hanzi ? pinyinForHanzi(hanzi) : '', english: '', note: '', via };
+  }
   // Merge multiple sentence-objects into one turn.
   const merged = objs.reduce((a, o) => ({
     hanzi: (a.hanzi || '') + (o.hanzi || ''),
@@ -136,6 +153,21 @@ function parseTeacher({ text, via }) {
     english: [a.english, o.english].filter(Boolean).join(' '),
     note: a.note || o.note || '',
   }), {});
+  // Never let romanization/English contaminate the hanzi field (spoken + shown).
+  merged.hanzi = cjkOnly(merged.hanzi);
+  // Beginners read the pinyin, not the characters — so it must ALWAYS be present.
+  // Trust the model's pinyin when it gave one (it keeps proper tone marks and
+  // word spacing); only synthesize from the hanzi when it's missing entirely.
+  if (merged.hanzi && !merged.pinyin.trim()) {
+    const derived = pinyinForHanzi(merged.hanzi);
+    if (derived) merged.pinyin = derived;
+  }
+  // A beginner should never get a reply with no English. Fall back to a gloss
+  // scaffold when the model omits it.
+  if (merged.hanzi && !merged.english) {
+    const g = glossForHanzi(merged.hanzi);
+    if (g) merged.english = g;
+  }
   return { ...merged, via };
 }
 
