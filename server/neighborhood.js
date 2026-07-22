@@ -11,6 +11,7 @@ import { cleanGloss } from './exercises.js';
 import { scriptLevel } from './learner.js';
 import { interestWeights } from './interests.js';
 import { SEMANTIC_RADICALS, rhyme, firstReading } from './families.js';
+import { pickCapability, requirementsFor } from './capabilities.js';
 
 const CJK = /[一-鿿]/;
 const chars = (s) => [...(s || '')].filter(ch => CJK.test(ch));
@@ -176,32 +177,84 @@ function sceneFor(focal) {
   return topics[0] || 'everyday conversation';
 }
 
-// The lesson plan the Practice screen and Laoshi consume.
+// Turn a capability into hidden educational OPPORTUNITIES (not dialogue). The
+// Director/Qwen weave these in only when natural; they are never spoken as topics.
+function buildObjectives(capability, capVocab, patterns) {
+  const patternTags = requirementsFor(capability.id).filter(r => r.kind === 'pattern').map(r => r.ref);
+  const focalV = capVocab.focal ? [capVocab.focal.hanzi] : [];
+  const support = (capVocab.supporting || []).map(w => w.hanzi);
+  const objs = [{
+    objective: capability.name,                    // e.g. "describe a living thing"
+    vocab: dedupeStr([...focalV, ...support]).slice(0, 6),
+    pattern: patternTags[0] || null,
+    priority: 1,
+  }];
+  // A secondary opportunity: resurface due items inside the same conversation.
+  if (capVocab.reviewVocab?.length) {
+    objs.push({ objective: 'reuse recently-learned words', vocab: capVocab.reviewVocab.map(w => w.hanzi), pattern: null, priority: 2 });
+  }
+  // A family pattern the focal opens, if any (transfer opportunity).
+  const fam = patterns.find(p => p.semantic || p.phonetic);
+  if (fam) objs.push({ objective: 'reinforce a character family in passing', vocab: [fam.char], pattern: fam.semantic?.radical || fam.phonetic?.component || null, priority: 3 });
+  return objs;
+}
+const dedupeStr = (a) => [...new Set(a.filter(Boolean))];
+
+// The lesson plan the Practice screen, Director, and Laoshi consume. Keyed on a
+// CAPABILITY (the WHAT), which resolves the focal + supporting vocabulary; the
+// neighborhood engine still supplies connected words + instructional families.
 export function buildLessonPlan() {
   const introduced = introducedWordIds();
   const known = knownWordIds();
   const dueSet = new Set(dueWordCards());
 
-  const focal = pickFocal(introduced, known, dueSet);
-  const focalRow = wordRow(focal.id) || { wordId: focal.id, hanzi: focal.hanzi, pinyin: '', gloss: '' };
-  const focalFull = db().prepare('SELECT audio_path FROM words WHERE id=?').get(focal.id);
-  const { reinforce, exposeRelated } = assemble(focal, dueSet, known);
+  // Capability is the primary objective. It picks the focal word (relevance-first)
+  // and the supporting vocabulary. Falls back to pure graph-transfer focal if the
+  // capability catalog isn't seeded, so the planner never hard-depends on it.
+  const pick = pickCapability({ introduced, known, dueSet });
+  let capability = null, capVocab = null, focalId, focalTransfer = 0;
+  if (pick?.vocab?.focal) {
+    capability = pick.capability;
+    capVocab = pick.vocab;
+    focalId = capVocab.focal.wordId;
+  } else {
+    const f = pickFocal(introduced, known, dueSet);
+    focalId = f.id; focalTransfer = f.transfer || 0;
+  }
 
-  const patterns = instructionalPattern(focal.hanzi);
+  const focalRow = wordRow(focalId) || { wordId: focalId, hanzi: '', pinyin: '', gloss: '' };
+  const focalFull = db().prepare('SELECT audio_path FROM words WHERE id=?').get(focalId);
+  const focalForAssemble = { id: focalId, hanzi: focalRow.hanzi };
+  const { reinforce, exposeRelated } = assemble(focalForAssemble, dueSet, known);
+
+  const patterns = instructionalPattern(focalRow.hanzi);
+
+  // targetVocab keeps its established shape (focal + expose + reinforce) for
+  // backward-compat with conversation.js, and folds in the capability's supporting
+  // words so the means-to-the-capability are reusable in the dialogue.
+  const support = (capVocab?.supporting || []).map(w => ({ wordId: w.wordId, hanzi: w.hanzi, pinyin: w.pinyin, gloss: w.gloss, role: 'support' }));
   const targetVocab = dedupe([
     { ...focalRow, role: 'focal' },
+    ...support,
     ...exposeRelated.map(w => ({ ...w, role: 'expose' })),
     ...reinforce.map(w => ({ ...w, role: 'reinforce' })),
   ]);
 
+  const objectives = capability ? buildObjectives(capability, capVocab, patterns) : [];
+  const reviewVocab = capVocab?.reviewVocab || reinforce;
+
   return {
-    focal: { ...focalRow, audio: focalFull?.audio_path || null, transfer: focal.transfer || 0 },
+    capability: capability ? { id: capability.id, slug: capability.slug, name: capability.name, cefr: capability.cefr_ish } : null,
+    objectives,                                     // hidden educational opportunities
+    focal: { ...focalRow, audio: focalFull?.audio_path || null, transfer: focalTransfer },
     patterns,
     reinforce,
     exposeRelated,
     targetVocab,
+    reviewVocab,
     scriptLevel: scriptLevel(),
-    scene: sceneFor(focal),
+    scene: sceneFor({ id: focalId }),
+    signals: pick?.signals || null,                 // hidden planning telemetry
   };
 }
 

@@ -20,7 +20,7 @@ import { hasApiKey, completeJson } from '../server/anthropic.js';
 export const CATALOG = [
   // ---- Survival (A0/A1): the first things you can do at all -----------------
   { slug: 'greet_someone', name: 'greet someone', cefr: 'A0', order: 1, prereq: [],
-    reqs: [['vocab', 'topic:greetings', 2], ['vocab', 'pos:r', 1]] },
+    reqs: [['vocab', 'word:您', 1.5], ['vocab', 'word:早', 1], ['vocab', 'pos:r', 1.2], ['vocab', 'topic:greetings', 1]] },
   { slug: 'introduce_self', name: 'introduce yourself', cefr: 'A1', order: 2, prereq: ['greet_someone'],
     reqs: [['vocab', 'topic:greetings', 1], ['vocab', 'pos:r', 1.5], ['pattern', 'shi-identity', 1]] },
   { slug: 'say_yes_no', name: 'say yes and no', cefr: 'A0', order: 3, prereq: [],
@@ -30,7 +30,7 @@ export const CATALOG = [
   { slug: 'tell_time', name: 'tell and ask the time', cefr: 'A1', order: 5, prereq: ['count_and_number'],
     reqs: [['vocab', 'topic:time', 2], ['vocab', 'topic:numbers', 1]] },
   { slug: 'express_thanks', name: 'thank and respond politely', cefr: 'A0', order: 6, prereq: ['greet_someone'],
-    reqs: [['vocab', 'topic:greetings', 2]] },
+    reqs: [['vocab', 'word:谢谢', 1.5], ['vocab', 'word:请', 1], ['vocab', 'word:对不起', 1], ['vocab', 'topic:greetings', 0.8]] },
   { slug: 'ask_someones_name', name: 'ask what something is called', cefr: 'A1', order: 7, prereq: ['introduce_self'],
     reqs: [['vocab', 'pos:r', 1.5], ['pattern', 'shenme-question', 1]] },
   { slug: 'talk_about_family', name: 'talk about your family', cefr: 'A1', order: 8, prereq: ['introduce_self'],
@@ -42,7 +42,7 @@ export const CATALOG = [
   { slug: 'ask_price', name: 'ask how much something costs', cefr: 'A2', order: 11, prereq: ['count_and_number'],
     reqs: [['vocab', 'topic:money', 2], ['vocab', 'topic:shopping', 1], ['pattern', 'duoshao-question', 1]] },
   { slug: 'ask_where_something_is', name: 'ask where something is', cefr: 'A2', order: 12, prereq: ['ask_someones_name'],
-    reqs: [['vocab', 'topic:places', 2], ['vocab', 'word:在', 1], ['pattern', 'zai-location', 1.5]] },
+    reqs: [['vocab', 'word:在', 1.5], ['vocab', 'word:哪儿', 1.2], ['vocab', 'word:这儿', 1], ['vocab', 'topic:places', 1], ['pattern', 'zai-location', 1.5]] },
 
   // ---- Descriptive (A2): give things qualities ------------------------------
   { slug: 'describe_a_person', name: 'describe a person', cefr: 'A2', order: 20, prereq: ['talk_about_family'],
@@ -52,13 +52,13 @@ export const CATALOG = [
   { slug: 'describe_color_and_object', name: 'describe an object and its color', cefr: 'A2', order: 22, prereq: ['count_and_number'],
     reqs: [['vocab', 'topic:colors', 2], ['vocab', 'pos:a', 1], ['vocab', 'pos:n', 1]] },
   { slug: 'describe_clothing', name: 'describe what someone is wearing', cefr: 'A2', order: 23, prereq: ['describe_color_and_object'],
-    reqs: [['vocab', 'topic:clothing', 3], ['vocab', 'topic:colors', 1], ['vocab', 'word:穿', 1]] },
+    reqs: [['vocab', 'word:穿', 1.5], ['vocab', 'word:衣服', 1.3], ['vocab', 'topic:clothing', 1.5], ['vocab', 'topic:colors', 1]] },
   { slug: 'describe_the_weather', name: 'talk about the weather', cefr: 'A2', order: 24, prereq: ['express_like_dislike'],
     reqs: [['vocab', 'topic:weather', 3], ['vocab', 'pos:a', 1]] },
   { slug: 'describe_feelings', name: 'say how you feel', cefr: 'A2', order: 25, prereq: ['express_like_dislike'],
     reqs: [['vocab', 'topic:feelings', 3], ['vocab', 'word:很', 1], ['pattern', 'hen-degree', 1]] },
   { slug: 'describe_a_place', name: 'describe a place', cefr: 'A2', order: 26, prereq: ['ask_where_something_is', 'describe_color_and_object'],
-    reqs: [['vocab', 'topic:places', 2], ['vocab', 'pos:a', 1], ['pattern', 'you-existence', 1]] },
+    reqs: [['vocab', 'pos:a', 1.5], ['vocab', 'topic:home', 1.2], ['vocab', 'topic:places', 1], ['pattern', 'you-existence', 1]] },
   { slug: 'talk_about_daily_routine', name: 'describe your daily routine', cefr: 'A2', order: 27, prereq: ['tell_time'],
     reqs: [['vocab', 'pos:v', 2], ['vocab', 'topic:time', 1], ['pattern', 'time-sequence', 1]] },
   { slug: 'compare_two_things', name: 'compare two things', cefr: 'A2', order: 28, prereq: ['describe_color_and_object'],
@@ -132,7 +132,10 @@ async function enrich() {
     if (!extra) {
       try {
         extra = await completeJson({
-          system: 'You design a Mandarin capability curriculum. Given a capability and the available topic tags, propose up to 3 additional requirement refs that help a learner express it. Use only refs of the form "topic:<tag>" (from the provided list) or "pos:<code>" where code ∈ n,v,a,d,r,m,q,t (noun,verb,adjective,adverb,pronoun,numeral,classifier,time). Output JSON {reqs:[{kind:"vocab",ref,weight}]}.',
+          // Topic-only: broad POS refs (pos:v/pos:d) over-match and pollute focal
+          // resolution, so enrichment refines TOPIC coverage only. The deterministic
+          // catalog already carries the structural POS-role requirements.
+          system: 'You design a Mandarin capability curriculum. Given a capability and the available topic tags, propose up to 3 additional TOPIC requirement refs (from the provided list) that help a learner express it. Use only refs of the form "topic:<tag>". Output JSON {reqs:[{kind:"vocab",ref,weight}]}.',
           messages: [{ role: 'user', content: `Capability: ${c.name} (${c.slug}). Available topics: ${topics.join(', ')}.` }],
           max_tokens: 300,
         });
@@ -146,7 +149,7 @@ async function enrich() {
     const seen = new Set(d.prepare('SELECT ref FROM capability_requirements WHERE capability_id=?').all(id).map(r => r.ref));
     for (const r of extra.reqs.slice(0, 3)) {
       if (!r?.ref || seen.has(r.ref)) continue;
-      if (!/^(topic:|pos:|word:)/.test(r.ref)) continue;   // guard the resolver's contract
+      if (!/^topic:/.test(r.ref)) continue;                // enrichment refines topic coverage only
       ins.run(id, 'vocab', r.ref, r.weight ?? 0.8); seen.add(r.ref); added++;
     }
   }
