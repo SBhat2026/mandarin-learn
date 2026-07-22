@@ -2,6 +2,7 @@ import { db, getSetting, setSetting } from './db.js';
 import { State } from './fsrs.js';
 import { WORD_CARD_TYPES } from './cards.js';
 import { rebuildUnits } from './units.js';
+import { upsertFact } from './profile.js';
 
 // Mark all words in the first N units as already known: create their cards in
 // review state so they're skipped as new and count toward unit completion.
@@ -29,6 +30,10 @@ export function saveOnboarding({ interestTopics, knownUnits, micWorks }) {
   const topics = (interestTopics || []).slice(0, 3);
   setSetting('interest_topics', topics);
   if (typeof micWorks === 'boolean') setSetting('mic_works', micWorks);
+
+  // Seed stated interests into the durable personal profile so Laoshi can open
+  // with a personal hook from the very first conversation (source='stated').
+  for (const t of topics) upsertFact({ key: 'interest', value: t, kind: 'interest', confidence: 0.75, source: 'stated' });
 
   // Rebuild the path so interest topics actually reshape unit ordering, THEN mark
   // known units (which depend on the new ordering).
