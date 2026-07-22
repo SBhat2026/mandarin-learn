@@ -67,8 +67,8 @@ export async function conversationTurn({ id, userText = '', history = [], forceW
   // Completion is driven by momentum + education, not a fixed turn count. Build the
   // transcript so far (history + this learner turn) to evaluate live signals.
   const soFar = [...history];
-  if (userText) soFar.push({ role: 'user', content: userText });
-  const completion = liveCompletion(soFar, blueprint, plan);
+  if (userText && !history.some(m => m.role === 'user' && (m.content === userText || m.hanzi === userText))) soFar.push({ role: 'user', content: userText });
+  const completion = liveCompletion(soFar, blueprint, plan, exchanges);   // authoritative exchange count
   const shouldWrap = forceWrap || extWrap || completion.shouldWrap;
   const stage = conversationStage({ exchanges, budget: blueprint.budget, shouldWrap });
 

@@ -81,10 +81,12 @@ function maxQuestionRung(learner) {
 }
 
 // Live completion decision. Prefer to satisfy education before wrapping, but never
-// run past the momentum/budget ceiling.
-export function liveCompletion(transcript = [], blueprint = {}, plan = {}) {
+// run past the momentum/budget ceiling. `exchangeCount`, when given, is the
+// authoritative turn count (from the session) so the ceiling doesn't depend on how
+// the client shaped its history; momentum/metrics still read the transcript.
+export function liveCompletion(transcript = [], blueprint = {}, plan = {}, exchangeCount = null) {
   const [min, max] = blueprint.budget?.exchanges || [4, 8];
-  const exchanges = transcript.filter(t => t.role === 'user').length;
+  const exchanges = exchangeCount ?? transcript.filter(t => t.role === 'user').length;
   const momentum = computeMomentum(transcript);
   const metrics = computeMetrics(transcript, plan);
 
