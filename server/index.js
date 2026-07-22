@@ -111,7 +111,7 @@ app.post('/api/conversation/complete', wrap(async (req, res) => {
   const { sessionId, transcript = [], endedReason } = req.body || {};
   const plan = sessionId ? sessionPlan(sessionId) : req.body?.plan;
   if (!plan) return res.status(400).json({ error: 'unknown session' });
-  const result = await scheduleFromConversation({ plan, transcript, sessionId });
+  const result = await scheduleFromConversation({ plan, transcript, sessionId, endedReason });
   if (sessionId) markEnded(sessionId, endedReason);
   runBackground().catch(() => {});
   res.json(result);

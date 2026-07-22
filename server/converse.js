@@ -14,6 +14,7 @@ import { capabilityMastery } from './capabilities.js';
 import { buildExercise, cleanGloss } from './exercises.js';
 import { createCardsForWord } from './cards.js';
 import { weakTone, buildToneDrill } from './tone.js';
+import { liveCompletion } from './momentum.js';
 
 function genId() {
   return 'c_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -62,8 +63,13 @@ export async function conversationTurn({ id, userText = '', history = [], forceW
   const { plan, blueprint } = s;
   const prevStage = s.stage;
   const exchanges = s.exchanges + (userText ? 1 : 0);
-  const [, maxEx] = blueprint.budget.exchanges;
-  const shouldWrap = forceWrap || extWrap || exchanges >= maxEx;
+
+  // Completion is driven by momentum + education, not a fixed turn count. Build the
+  // transcript so far (history + this learner turn) to evaluate live signals.
+  const soFar = [...history];
+  if (userText) soFar.push({ role: 'user', content: userText });
+  const completion = liveCompletion(soFar, blueprint, plan);
+  const shouldWrap = forceWrap || extWrap || completion.shouldWrap;
   const stage = conversationStage({ exchanges, budget: blueprint.budget, shouldWrap });
 
   const reply = await laoshiConverse({
@@ -80,7 +86,7 @@ export async function conversationTurn({ id, userText = '', history = [], forceW
   const inlineRep = (stage === 'practice' && prevStage !== 'practice') ? buildInlineRep(plan) : null;
   const excursion = (stage === 'confirm' && prevStage !== 'confirm') ? buildExcursion(plan, blueprint) : null;
 
-  return { ...reply, used, stage, shouldWrap, inlineRep, excursion };
+  return { ...reply, used, stage, shouldWrap, wrapReason: completion.reason, inlineRep, excursion };
 }
 
 // A single recognition rep on a focal/target word, wired to the real scheduler via

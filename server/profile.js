@@ -96,7 +96,12 @@ function heuristicHarvest(line) {
   let n = 0;
   for (const [re, key, kind] of PATTERNS) {
     const m = line.match(re);
-    if (m) { upsertFact({ key, value: (m[1] || m[0]).trim(), kind, confidence: 0.5, source: 'inferred' }); n++; }
+    if (m) {
+      // Trim the captured span at a clause boundary so "hiking and I study X" →
+      // "hiking" rather than swallowing the next clause.
+      const value = (m[1] || m[0]).split(/\s+(?:and|but|because|so|,|;)\s+/i)[0].trim();
+      if (value.length >= 2) { upsertFact({ key, value, kind, confidence: 0.5, source: 'inferred' }); n++; }
+    }
   }
   return n;
 }

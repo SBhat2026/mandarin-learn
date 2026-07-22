@@ -9,6 +9,9 @@ import { updateMastery } from './learner.js';
 import { llmUnderstanding } from './reasoner.js';
 import { bumpInterests } from './interests.js';
 import { analyzeSpoken, persistPronunciation, accuracyToRating } from './pronunciation.js';
+import { recordCapabilityDemonstration } from './capabilities.js';
+import { harvestFromTranscript } from './profile.js';
+import { computeMetrics } from './momentum.js';
 
 const norm = (s = '') => String(s).replace(/[\s\p{P}\p{S}]/gu, '');
 const tonelessPinyin = (s = '') => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]/g, '');
@@ -59,8 +62,10 @@ export function captureExamples(transcript, targetVocab) {
   return n;
 }
 
-// Infer understanding and schedule review for each target concept.
-export async function scheduleFromConversation({ plan, transcript }) {
+// Infer understanding and schedule review for each target concept. Extended (F):
+// also infers capability demonstrations, harvests durable personal facts, and
+// records hidden conversation metrics. Everything stays invisible.
+export async function scheduleFromConversation({ plan, transcript, sessionId = null, endedReason = null }) {
   const targetVocab = plan.targetVocab || [];
   const sig = heuristicSignals(transcript, targetVocab);
 
@@ -98,7 +103,41 @@ export async function scheduleFromConversation({ plan, transcript }) {
   bumpInterests(outcomes.filter(o => !o.produced && o.exposed).map(o => o.wordId), 0.5);
 
   const examples = captureExamples(transcript, targetVocab);
-  return { outcomes, examples };
+
+  // (a) Capability demonstration: did the learner actually EXPRESS the capability
+  // (produce ≥1 of its target words, with real production)? Update hidden mastery.
+  const metrics = computeMetrics(transcript, plan);
+  let capabilityDemo = null;
+  if (plan.capability?.id && (outcomes.some(o => o.produced) || metrics.spontaneous_vocab >= 1)) {
+    const quality = Math.min(1, 0.55 + 0.08 * metrics.spontaneous_vocab + 0.03 * metrics.avg_learner_len);
+    const score = recordCapabilityDemonstration(plan.capability.id, quality);
+    capabilityDemo = { capabilityId: plan.capability.id, quality: Number(quality.toFixed(2)), score: Number(score.toFixed(2)) };
+  }
+
+  // (b) Harvest durable personal facts + open threads for future personalization.
+  let profileHarvest = null;
+  try { profileHarvest = await harvestFromTranscript(transcript); } catch {}
+
+  // (c) Persist the hidden conversation metrics.
+  metrics.capability_demos = capabilityDemo ? 1 : 0;
+  metrics.ended_reason = endedReason;
+  if (sessionId) persistMetrics(sessionId, metrics);
+
+  return { outcomes, examples, capabilityDemo, profileHarvest, metrics };
+}
+
+// Store the hidden conversation metrics row.
+function persistMetrics(sessionId, m) {
+  db().prepare(`INSERT INTO conversation_metrics(session_id, learner_initiated_questions,
+      spontaneous_vocab, avg_learner_len, branches, corrections, capability_demos, exchanges,
+      max_question_rung, momentum, ended_reason, created)
+    VALUES(@session_id,@lq,@sv,@len,@br,@corr,@cd,@ex,@rung,@mom,@reason,datetime('now'))
+    ON CONFLICT(session_id) DO UPDATE SET learner_initiated_questions=@lq, spontaneous_vocab=@sv,
+      avg_learner_len=@len, branches=@br, corrections=@corr, capability_demos=@cd, exchanges=@ex,
+      max_question_rung=@rung, momentum=@mom, ended_reason=@reason`)
+    .run({ session_id: sessionId, lq: m.learner_initiated_questions, sv: m.spontaneous_vocab,
+      len: m.avg_learner_len, br: m.branches, corr: m.corrections, cd: m.capability_demos,
+      ex: m.exchanges, rung: m.max_question_rung, mom: m.momentum, reason: m.ended_reason });
 }
 
 // Invisible pronunciation observation from a single spoken conversation turn.

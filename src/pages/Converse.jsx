@@ -59,7 +59,7 @@ export default function Converse({ onFallback }) {
       });
       if (reply.hanzi) speak(reply.hanzi);
       if (reply.excursion) setExcursion(reply.excursion);
-      if (reply.shouldWrap) finish(sid);
+      if (reply.shouldWrap) finish(sid, reply.wrapReason);
     } catch { onFallback?.(); } finally { setBusy(false); }
   }
 
@@ -72,10 +72,10 @@ export default function Converse({ onFallback }) {
   }
 
   // Natural close: no score screen. Run the invisible post-hoc inference.
-  function finish(sid = sessionId) {
+  function finish(sid = sessionId, endedReason = null) {
     setDone(true);
     const transcript = items.filter(i => i.role === 'user' || i.role === 'assistant');
-    api.conversationComplete({ sessionId: sid, transcript }).catch(() => {});
+    api.conversationComplete({ sessionId: sid, transcript, endedReason }).catch(() => {});
   }
 
   async function mic() {
