@@ -7,6 +7,7 @@ import ToneTrainer from './pages/ToneTrainer.jsx';
 import Reading from './pages/Reading.jsx';
 import Stats from './pages/Stats.jsx';
 import Onboarding from './pages/Onboarding.jsx';
+import SettingsGear from './components/SettingsGear.jsx';
 
 // One primary action — talking with Laoshi — with the practice tools kept secondary.
 const tabs = [
@@ -50,6 +51,7 @@ export default function App() {
                 </NavLink>
               ))}
             </nav>
+            <div className="ml-auto"><SettingsGear /></div>
           </div>
         </header>
       )}

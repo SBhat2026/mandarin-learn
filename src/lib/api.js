@@ -51,6 +51,8 @@ export const api = STATIC ? {
   tone: () => demo('tone.json'),
   onboarding: () => Promise.resolve({ onboarded: true }),
   saveOnboarding: async () => ({ ok: true, demo: true }),
+  modelSettings: () => Promise.resolve({ pref: 'fast', richAvailable: false, hasApiKey: false }),
+  setModelPref: async (pref) => ({ pref, richAvailable: false }),
 } : {
   meta: () => req('/api/meta'),
   home: () => req('/api/home'),
@@ -74,6 +76,8 @@ export const api = STATIC ? {
   tone: (max = 10) => req('/api/tone?max=' + max),
   onboarding: () => req('/api/onboarding'),
   saveOnboarding: (body) => req('/api/onboarding', { method: 'POST', body: JSON.stringify(body) }),
+  modelSettings: () => req('/api/settings/model'),
+  setModelPref: (pref) => req('/api/settings/model', { method: 'POST', body: JSON.stringify({ pref }) }),
 };
 
 // Audio: real media is only present with the backend. In the demo, playAudio falls

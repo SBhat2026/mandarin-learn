@@ -17,6 +17,7 @@ import { lookup } from './dictionary.js';
 import { passages } from './reading.js';
 import { buildToneDrill, toneStats, weakTone } from './tone.js';
 import { saveOnboarding, onboardingState } from './onboarding.js';
+import { claudeModelPref, setClaudeModelPref, richModelAvailable } from './anthropic.js';
 import { TOPICS } from './taxonomy.js';
 import { State } from './fsrs.js';
 
@@ -192,6 +193,17 @@ app.get('/api/tone', wrap((req, res) => {
 // ---- Onboarding / settings ----
 app.get('/api/onboarding', wrap((req, res) => res.json(onboardingState())));
 app.post('/api/onboarding', wrap((req, res) => res.json(saveOnboarding(req.body || {}))));
+
+// ---- Playtesting: invisible-pass model tier (Haiku ⇄ Sonnet), per-user ----
+app.get('/api/settings/model', wrap((req, res) => res.json({
+  pref: claudeModelPref(),
+  richAvailable: richModelAvailable(),
+  hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
+})));
+app.post('/api/settings/model', wrap((req, res) => {
+  const pref = setClaudeModelPref(req.body?.pref);
+  res.json({ pref, richAvailable: richModelAvailable() });
+}));
 
 const PORT = process.env.PORT || 5178;
 app.listen(PORT, () => console.log(`API on http://localhost:${PORT}`));

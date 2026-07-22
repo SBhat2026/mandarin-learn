@@ -20,7 +20,7 @@
 //   budget                : {newConcepts, reviewTargets, exchanges:[min,max], learnerInitiatedQuestions}
 //   exitStrategy          : string   how to wrap up naturally
 //   desiredLearnerFeeling : string   "I had an interesting conversation"
-import { hasApiKey, completeJson } from './anthropic.js';
+import { hasApiKey, completeJson, claudeModelPref, resolveModel } from './anthropic.js';
 import { profileForPrompt, recentThreads } from './profile.js';
 
 // The canonical question hierarchy (Workstream G). The Director orders a subset
@@ -63,10 +63,13 @@ async function buildBlueprintClaude(plan, ctx) {
     recentMetrics: ctx.metrics || null,
     preferredQuestionRungs: rungs,
   };
+  const tier = ctx.modelPref || claudeModelPref();
   const out = await completeJson({
-    system: `${DESIGN_PRINCIPLES}
-
-Given the capability to develop, the hidden objectives, the learner's profile, and their recent conversational behavior, output a Conversation Blueprint as strict JSON with EXACTLY these keys:
+    // DESIGN_PRINCIPLES is invariant across every conversation → cache it; only the
+    // per-conversation schema+payload instruction varies.
+    system: {
+      static: DESIGN_PRINCIPLES,
+      dynamic: `Given the capability to develop, the hidden objectives, the learner's profile, and their recent conversational behavior, output a Conversation Blueprint as strict JSON with EXACTLY these keys:
 {
  "conversationGoal": string,
  "openingStrategy": string,            // how Laoshi opens from a PERSONAL hook (reference a profile fact/thread if any)
@@ -76,16 +79,22 @@ Given the capability to develop, the hidden objectives, the learner's profile, a
  "tone": string,
  "questionLadder": string[],           // ordered subset of: ${QUESTION_RUNGS.join(', ')}
  "steeringSuggestions": string[],
- "excursions": [{"kind":"reading"|"tone_drill"|"rep_burst","enterLine":string,"exitBridge":string}],
+ "excursions": [{"kind":"reading"|"tone_drill"|"rep_burst"|"shadowing","enterLine":string,"exitBridge":string}],
+ "microNarration": {"use":boolean,"seed":string},   // OPTIONAL rare device: a tiny 1–2 sentence vignette Laoshi may narrate ONCE if it fits; keep it in comprehensible input. use=false most of the time.
+ "scene": string|null,                 // optional light real-world scene giving production a purpose (e.g. "ordering at a noodle shop")
  "budget": {"newConcepts":number,"reviewTargets":number,"exchanges":[number,number],"learnerInitiatedQuestions":number},
  "exitStrategy": string,
  "desiredLearnerFeeling": string
 }
-openingStrategy and personalConnections MUST reference the learner's real profile when one exists, and never open with "what do you want to talk about?". Keep excursions optional (0–1 here). Output ONLY the JSON.`,
+openingStrategy and personalConnections MUST reference the learner's real profile when one exists, and never open with "what do you want to talk about?". Keep excursions optional (0–1 here). microNarration.use should be true only occasionally. Output ONLY the JSON.`,
+    },
+    tier,
     messages: [{ role: 'user', content: JSON.stringify(payload) }],
     max_tokens: 900,
   });
   out._engine = 'claude';
+  out._model = resolveModel(tier);
+  console.log(`[director] blueprint via ${out._model} (${tier})`);
   return out;
 }
 
@@ -124,6 +133,8 @@ export function buildBlueprintLocal(plan, ctx = {}) {
       interest ? `pivot toward ${interest} if energy dips` : 'pivot to a concrete, everyday detail if energy dips',
     ],
     excursions: [],   // offline path keeps it to pure conversation
+    microNarration: microNarrationSeed(plan),
+    scene: sceneFor(cap),
     budget: { newConcepts: 1, reviewTargets: Math.min(2, (plan.reviewVocab || []).length), exchanges: [4, 8], learnerInitiatedQuestions: 1 },
     exitStrategy: 'When it has run its course, warmly hand them a thought for next time and close without a formal ending.',
     desiredLearnerFeeling: 'I had an interesting little conversation with someone who knows me.',
@@ -155,6 +166,31 @@ function firstInterest(digest) {
   return m ? m[1].split(',')[0].trim() : null;
 }
 
+// Mini-narration (used SPARINGLY): a tiny 1–2 sentence vignette Laoshi may narrate
+// once, built from the focal word, to give comprehensible input in story form.
+// Offline we enable it only for the more descriptive/narrative capabilities so it
+// stays rare; the executor further limits it to a single use per conversation.
+function microNarrationSeed(plan) {
+  const cap = plan.capability;
+  const focal = plan.focal;
+  const narrativeish = cap && (cap.ordering ?? 0) >= 2 && focal?.hanzi;
+  if (!narrativeish) return { use: false, seed: '' };
+  return { use: true, seed: `a very short, concrete everyday moment involving ${focal.hanzi} (${focal.gloss || ''})`.trim() };
+}
+
+// A light real-world scene that gives production a purpose, when the capability
+// suggests one. Kept situational, never a quiz.
+function sceneFor(cap) {
+  if (!cap) return null;
+  const map = {
+    order_food: 'ordering something to eat at a small restaurant',
+    describe_the_weather: 'chatting about today\'s weather before heading out',
+    ask_where_something_is: 'asking a passer-by where something is',
+    describe_a_trip: 'swapping stories about a place you went',
+  };
+  return map[cap.slug] || null;
+}
+
 // Validate + coerce a blueprint to the schema so downstream code (Qwen executor,
 // completion logic) can trust its shape. Fills sane defaults for missing keys.
 export function validateBlueprint(bp, plan = {}) {
@@ -174,9 +210,14 @@ export function validateBlueprint(bp, plan = {}) {
     questionLadder: arr(b.questionLadder).filter(r => QUESTION_RUNGS.includes(r)).slice(0, 5),
     steeringSuggestions: arr(b.steeringSuggestions).map(String).slice(0, 5),
     excursions: arr(b.excursions).map(e => ({
-      kind: ['reading', 'tone_drill', 'rep_burst'].includes(e?.kind) ? e.kind : 'rep_burst',
+      kind: ['reading', 'tone_drill', 'rep_burst', 'shadowing'].includes(e?.kind) ? e.kind : 'rep_burst',
       enterLine: String(e?.enterLine || ''), exitBridge: String(e?.exitBridge || '') }))
       .filter(e => e.enterLine).slice(0, 2),
+    microNarration: (() => {
+      const m = b.microNarration && typeof b.microNarration === 'object' ? b.microNarration : {};
+      return { use: Boolean(m.use), seed: String(m.seed || '') };
+    })(),
+    scene: b.scene ? String(b.scene) : null,
     budget: {
       newConcepts: Number(budget.newConcepts ?? 1),
       reviewTargets: Number(budget.reviewTargets ?? 2),

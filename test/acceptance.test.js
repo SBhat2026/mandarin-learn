@@ -11,7 +11,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dir = mkdtempSync(join(tmpdir(), 'mandarin-acc-'));
 process.env.APP_DB_PATH = join(dir, 'app.db');
 process.env.APP_MEDIA_DIR = join(dir, 'media');
-delete process.env.ANTHROPIC_API_KEY;   // prove the offline path
+// Prove the offline path. Set empty (not delete) so dotenv/config — which runs when
+// anthropic.js is later imported — does not resurrect the real key from .env.
+process.env.ANTHROPIC_API_KEY = '';
 
 const { initSchema } = await import('../server/db.js');
 initSchema();

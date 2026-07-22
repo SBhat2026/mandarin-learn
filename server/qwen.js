@@ -20,6 +20,28 @@ const OLLAMA_MODEL = process.env.QWEN_MODEL || 'qwen3.5:latest';
 const DASHSCOPE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
 const DASHSCOPE_MODEL = process.env.DASHSCOPE_MODEL || 'qwen-plus';
 
+// OpenRouter path (Workstream D) — WIRED BUT INERT. Off by default; when off it is
+// never called and the resolution order stays Ollama → DashScope. Flip on later by
+// setting USE_OPENROUTER=true plus OPENROUTER_API_KEY/OPENROUTER_MODEL. See docs/openrouter.md.
+const USE_OPENROUTER = process.env.USE_OPENROUTER === 'true';
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-instruct';
+
+// OpenAI-compatible OpenRouter chat. Minimal by design; not reached unless the flag
+// is on. TODO(openrouter): activate for remote hosting (see docs/openrouter.md).
+async function chatOpenRouter(messages, { temperature = 0.6, max_tokens = 512 } = {}) {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) throw new Error('OPENROUTER_API_KEY not set');
+  const r = await fetch(OPENROUTER_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+    body: JSON.stringify({ model: OPENROUTER_MODEL, messages, temperature, max_tokens }),
+  });
+  if (!r.ok) throw new Error(`OpenRouter ${r.status}`);
+  const d = await r.json();
+  return { text: d.choices?.[0]?.message?.content ?? '', via: 'openrouter' };
+}
+
 async function withTimeout(promise, ms) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), ms);
@@ -33,8 +55,14 @@ export async function ollamaUp() {
   } catch { return false; }
 }
 
-// Low-level chat completion. Tries Ollama, then DashScope. Returns assistant text.
+// Low-level chat completion. Resolution order Ollama → DashScope; OpenRouter only
+// when explicitly enabled (inert by default). Returns assistant text.
 export async function chat(messages, { temperature = 0.6, max_tokens = 512 } = {}) {
+  // 0) OpenRouter (opt-in remote) — off unless USE_OPENROUTER=true.
+  if (USE_OPENROUTER) {
+    try { return await chatOpenRouter(messages, { temperature, max_tokens }); }
+    catch (e) { /* fall through to local/cloud so a turn always completes */ }
+  }
   // 1) local Ollama
   if (await ollamaUp()) {
     try {
@@ -108,6 +136,15 @@ function stageDirective(stage, bp) {
   }
 }
 
+// Hidden per-turn difficulty nudge (Workstream F). `signal` in [-1,1]: negative =
+// the learner is struggling (simplify), positive = breezing (enrich). Never surfaced.
+function calibrationDirective(signal) {
+  if (typeof signal !== 'number' || Number.isNaN(signal)) return '';
+  if (signal <= -0.4) return 'They seem to be finding this hard right now: use SHORTER sentences, only words they clearly know, go a little slower, and add gentle scaffolding. Do not introduce anything new this turn.';
+  if (signal >= 0.4) return 'They are handling this easily: you can raise the richness a little — a slightly longer turn or one more new word is fine.';
+  return '';
+}
+
 // Build the executor system prompt: Qwen PERFORMS the hidden blueprint turn-by-turn,
 // owning wording, curiosity, and tone, while the educational objectives stay
 // invisible. Replaces the old raw-vocab conductor prompt.
@@ -117,6 +154,18 @@ function executorSystem({ blueprint, stage = 'explore', knownWords = [], profile
     .map(o => `${o.objective}${o.vocab?.length ? ' [' + o.vocab.join(' ') + ']' : ''}`).join(' · ');
   const conn = (blueprint.personalConnections || []).slice(0, 3).join('; ');
   const nextRung = (blueprint.questionLadder || [])[0] || 'personal_experience';
+  // Mini-narration: a rare comprehensible-input vignette. Offer the option ONLY mid-
+  // conversation and phrase it as an at-most-once possibility so it stays sparing.
+  const narr = blueprint.microNarration;
+  const mayNarrate = narr?.use && (stage === 'explore' || stage === 'introduce')
+    ? `You MAY — at most ONCE in this whole conversation, and only if it flows naturally — tell a tiny 1–2 sentence story (${narr.seed}) using words they know, then ask them something about it. If it would feel forced, skip it.`
+    : '';
+  // A light scene gives production a purpose without becoming a quiz.
+  const scene = blueprint.scene && (stage === 'explore' || stage === 'introduce' || stage === 'practice')
+    ? `You may lightly set the scene of ${blueprint.scene} so talking has a real purpose — keep it situational and playful, never like an exercise.`
+    : '';
+  // Live difficulty calibration (Workstream F) — a hidden nudge to simplify or enrich.
+  const calib = calibrationDirective(blueprint._calibration);
   return [
     'You are 老师 (Lǎoshī), a warm Mandarin teacher who has an ONGOING relationship with THIS learner. You are continuing that relationship, NOT starting a lesson, and NOT a generic AI assistant.',
     profileDigest ? `What you know about them (let it shape you; never recite it as data): ${profileDigest}` : '',
@@ -125,8 +174,14 @@ function executorSystem({ blueprint, stage = 'explore', knownWords = [], profile
     opps ? `Educational opportunities to weave in ONLY when the conversation naturally invites them (never as the subject): ${opps}.` : '',
     `Tone: ${blueprint.tone}.`,
     stageDirective(stage, blueprint),
+    scene,
+    mayNarrate,
+    calib,
     `When you ask a question, prefer a "${nextRung}" style question.`,
     scriptDirective || 'Write primarily in pinyin with supporting hanzi.',
+    // WORDING (Workstream C): the 9.7B model tends to reach for literary flourish.
+    // Steer it hard toward plain, reusable, learner-first language.
+    'WORDING: use SIMPLE, common, everyday words and short natural sentences. Avoid literary, idiomatic, or stylistic flourish and rare vocabulary unless the learner is clearly advanced. Clarity and reusability beat sounding impressive — say things the way a kind teacher would to a beginner.',
     'Comprehensible input: build turns almost entirely from KNOWN words; introduce at most one new idea per turn and make its meaning obvious from context.',
     'Keep every turn SHORT (1–2 sentences). Model corrections naturally instead of lecturing. Stay fully in character.',
     'HARD RULES: never announce a lesson, a topic, or a "new word"; never present vocabulary as the subject; establish the personal connection before teaching; end most turns with a question.',
