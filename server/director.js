@@ -108,7 +108,7 @@ export function buildBlueprintLocal(plan, ctx = {}) {
     ? `Pick up the open thread naturally — ask how "${threads[0]}" is going.`
     : interest
       ? `Open by connecting to something they like (${interest}) and ask a warm question about it.`
-      : `Open warmly and personally about everyday life; ask one easy question. Do NOT ask "what do you want to talk about?".`;
+      : `Open warmly and personally about their day or something concrete in everyday life; ask one easy question. Never open with a generic "so, what shall we discuss?" prompt.`;
 
   return {
     conversationGoal: goal,

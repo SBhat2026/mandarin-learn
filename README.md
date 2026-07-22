@@ -42,6 +42,41 @@ storage — so the whole thing can later be wrapped in Tauri.
   flags misconceptions, and tunes scheduling to a time budget. The learner talks only
   to Laoshi.
 
+### The conversational architecture (how it teaches)
+
+A study session should feel like **continuing a relationship with a teacher**, not
+starting a lesson. Educational objectives never surface — no "Today's topic", no
+target-word chips, no scores. The pipeline that makes this work:
+
+```
+Learner model + graph + personal profile   (state)
+   → Adaptive planner   (capabilities)   WHAT: an expressive capability + hidden objectives
+   → Conversation Director  (Claude/offline)  HOW-plan: a hidden Conversation Blueprint
+   → Laoshi executor  (Qwen)                   WORDS: speaks the blueprint turn-by-turn
+   → Unified conversation surface  (React)     one thread; inline reps; framed excursions
+   → Post-hoc inference  (extends conversation.js)  understanding, capability demos, profile, metrics
+```
+
+- **Capabilities, not word lists.** Lessons are planned around what the learner can
+  *do* — "describe a living thing", "talk about a past action" (`server/capabilities.js`,
+  `ingest/seed-capabilities.js`). Vocabulary is selected as the means to a capability.
+- **A planning-to-conversation bridge.** The **Director** (`server/director.js`) turns
+  the capability plan + a durable **personal profile** (`server/profile.js`) into a
+  hidden [Conversation Blueprint](docs/conversation-blueprint.md): a personal opening
+  hook, educational opportunities to weave in only when natural, a question ladder, a
+  budget, and a natural exit. Qwen performs the blueprint; it never sees a raw vocab list.
+- **One continuous surface.** The guided lesson and free chat are the same screen
+  (`src/pages/Converse.jsx`). Light reps appear inline as chat bubbles; heavier
+  activities open as in-character framed excursions.
+- **Hidden lifecycle + natural completion.** Each conversation runs through hidden
+  stages and ends when momentum decays or the budget/education is satisfied
+  (`server/momentum.js`) — wrapping up warmly, never with "Lesson complete".
+- **Remembers you across sessions.** Durable personal facts + open threads are harvested
+  from conversation and used to personalize future openings and examples — all local.
+- **Degrades gracefully offline.** With no Claude key (or no credits) the Director,
+  profile harvest, and understanding refinement all use working fallbacks; Laoshi still
+  runs on local Qwen. See [docs/offline-mode.md](docs/offline-mode.md).
+
 ---
 
 ## Stack
