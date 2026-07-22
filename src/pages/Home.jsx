@@ -31,10 +31,10 @@ export default function Home() {
           <Metric value={dueNow} label="Due today" primary />
           <Metric value={learned} label="Words learned" />
           <Metric value={`${streak}`} label="Day streak" suffix={streak > 0 ? '🔥' : ''} />
-          <button onClick={() => navigate('/session')}
+          <button onClick={() => navigate('/converse')}
             className="ml-auto self-stretch px-6 rounded-2xl bg-ink text-white font-medium shadow-soft
                        hover:shadow-lift transition-shadow flex items-center gap-2">
-            {dueNow > 0 ? 'Review' : 'Practice'} <span aria-hidden>→</span>
+            <span className="hanzi">跟老师聊聊</span> <span aria-hidden>→</span>
           </button>
         </div>
       </section>
@@ -47,7 +47,7 @@ export default function Home() {
           {units.map(u => (
             <PathNode key={u.id} unit={u} current={u.id === currentUnitId}
               refEl={u.id === currentUnitId ? currentRef : null}
-              onClick={() => u.id === currentUnitId && navigate('/session')} />
+              onClick={() => u.id === currentUnitId && navigate('/converse')} />
           ))}
         </ol>
       </div>

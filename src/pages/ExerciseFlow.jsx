@@ -345,7 +345,7 @@ function SessionComplete({ done, onReload, navigate }) {
       <p className="text-ink-soft mt-2 text-sm">{done.count} cards · {done.again} to revisit</p>
       <div className="mt-6 flex gap-2 justify-center">
         <button onClick={onReload} className="px-6 py-2.5 rounded-full bg-ink text-white text-sm">Keep going</button>
-        <button onClick={() => navigate('/laoshi')} className="px-6 py-2.5 rounded-full bg-white border border-line text-ink text-sm">Chat with Laoshi</button>
+        <button onClick={() => navigate('/converse')} className="px-6 py-2.5 rounded-full bg-white border border-line text-ink text-sm">Chat with Laoshi</button>
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { api, isDemo } from './lib/api.js';
 import Home from './pages/Home.jsx';
 import Session from './pages/Session.jsx';
@@ -7,14 +7,13 @@ import ToneTrainer from './pages/ToneTrainer.jsx';
 import Reading from './pages/Reading.jsx';
 import Stats from './pages/Stats.jsx';
 import Onboarding from './pages/Onboarding.jsx';
-import Laoshi from './pages/Laoshi.jsx';
 
+// One primary action — talking with Laoshi — with the practice tools kept secondary.
 const tabs = [
   ['/', 'Home'],
-  ['/session', 'Practice'],
-  ['/laoshi', 'Laoshi'],
-  ['/tones', 'Tones'],
+  ['/converse', 'Talk'],
   ['/reading', 'Reading'],
+  ['/tones', 'Tones'],
   ['/stats', 'Progress'],
 ];
 
@@ -70,8 +69,10 @@ export default function App() {
         <div className="animate-fade">
           <Routes>
             <Route path="/" element={<Home />} />
-            <Route path="/session" element={<Session />} />
-            <Route path="/laoshi" element={<Laoshi />} />
+            <Route path="/converse" element={<Session />} />
+            {/* legacy routes → the unified conversation surface */}
+            <Route path="/session" element={<Navigate to="/converse" replace />} />
+            <Route path="/laoshi" element={<Navigate to="/converse" replace />} />
             <Route path="/tones" element={<ToneTrainer />} />
             <Route path="/reading" element={<Reading />} />
             <Route path="/stats" element={<Stats />} />

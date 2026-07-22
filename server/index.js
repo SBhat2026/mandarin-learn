@@ -9,6 +9,7 @@ import { runBackground } from './reasoner.js';
 import { laoshiReply, laoshiLesson, available as laoshiAvailable } from './qwen.js';
 import { buildLessonPlan } from './neighborhood.js';
 import { scheduleFromConversation, detectUsed, observePronunciation } from './conversation.js';
+import { startConversation, conversationTurn, sessionPlan, markEnded } from './converse.js';
 import { scriptDirective, personaDirective, scriptLevel } from './learner.js';
 import { fullStats } from './stats.js';
 import { evaluateThrottle } from './scheduler.js';
@@ -90,14 +91,41 @@ function knownWordStrings() {
     : [];
 }
 
-// The lesson plan: focal concept + connected neighborhood + instructional families.
+// ==== Unified conversation surface (primary) ================================
+// Start a conversation: build the capability-keyed plan + Director blueprint once,
+// attach them to a session id. Returns only what the UI needs — never objectives,
+// target chips, capability names, or scores.
+app.get('/api/conversation/plan', wrap(async (req, res) => res.json(await startConversation())));
+
+// One executor turn: advances the hidden stage, may attach an inline rep or a framed
+// excursion, and signals shouldWrap when completion conditions fire (Workstream F).
+app.post('/api/conversation/turn', wrap(async (req, res) => {
+  const { sessionId, history = [], userText = '', shouldWrap = false } = req.body || {};
+  if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+  res.json(await conversationTurn({ id: sessionId, history, userText, shouldWrap }));
+}));
+
+// Finish: extended post-hoc inference (understanding, capability demos, profile
+// harvest, metrics) against the stored plan.
+app.post('/api/conversation/complete', wrap(async (req, res) => {
+  const { sessionId, transcript = [], endedReason } = req.body || {};
+  const plan = sessionId ? sessionPlan(sessionId) : req.body?.plan;
+  if (!plan) return res.status(400).json({ error: 'unknown session' });
+  const result = await scheduleFromConversation({ plan, transcript, sessionId });
+  if (sessionId) markEnded(sessionId, endedReason);
+  runBackground().catch(() => {});
+  res.json(result);
+}));
+
+// ==== Legacy shims (delegating to the new surface / executor) ================
+// legacy shim: the old plan endpoint still returns a capability-keyed plan.
 app.get('/api/lesson/plan', wrap((req, res) => {
   const plan = buildLessonPlan();
   plan.scriptDirective = scriptDirective(plan.scriptLevel);
   res.json(plan);
 }));
 
-// One conductor turn from Laoshi within the lesson; reports which targets appeared.
+// legacy shim: one turn from a client-held plan, routed through the blueprint executor.
 app.post('/api/lesson/turn', wrap(async (req, res) => {
   const { plan, history = [], userText = '' } = req.body || {};
   if (!plan) return res.status(400).json({ error: 'plan required' });
