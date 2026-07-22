@@ -5,6 +5,8 @@
 // known vocabulary, corrects gently, and reinforces prior material.
 import 'dotenv/config';
 import { pinyinForHanzi, glossForHanzi } from './pronunciation.js';
+import { buildBlueprint, buildBlueprintLocal } from './director.js';
+import { profileForPrompt } from './profile.js';
 
 // Keep only Chinese characters (+ CJK punctuation) in the hanzi field, so a
 // non-JSON model reply never leaks pinyin/English into the spoken text or the
@@ -63,63 +65,99 @@ export async function available() {
   return (await ollamaUp()) || Boolean(process.env.DASHSCOPE_API_KEY);
 }
 
-// Build the teacher system prompt constrained to the learner's known vocabulary,
-// so every teacher turn is comprehensible input (mostly known + ≤1-2 new items).
-function laoshiSystem({ knownWords = [], focusWords = [], scene = 'free chat', level = 'beginner', persona = '' }) {
-  const known = knownWords.slice(0, 400).join(' ');
-  const focus = focusWords.join(' ');
+// The hidden conversation lifecycle. Qwen's behavior shifts by stage, but the
+// stage itself is NEVER shown to the learner. The turn endpoint advances it.
+export const STAGES = ['opening', 'personal_connection', 'explore', 'introduce', 'practice', 'confirm', 'wrap'];
+
+// Derive the current stage from how far the conversation has run against the
+// blueprint's exchange budget, plus the hidden shouldWrap signal from momentum/
+// completion (Workstream F). Education is woven in the middle; the close is natural.
+export function conversationStage({ exchanges = 0, budget = {}, shouldWrap = false } = {}) {
+  if (shouldWrap) return 'wrap';
+  const [min, max] = Array.isArray(budget.exchanges) ? budget.exchanges : [4, 8];
+  if (exchanges <= 0) return 'opening';
+  if (exchanges === 1) return 'personal_connection';
+  const span = Math.max(max, min + 1);
+  const frac = exchanges / span;
+  if (frac < 0.45) return 'explore';
+  if (frac < 0.6) return 'introduce';
+  if (frac < 0.8) return 'practice';
+  return 'confirm';
+}
+
+// Stage-specific behavior directive. Keeps educational moves invisible and shifts
+// Laoshi from personal opening → weaving → production → natural close.
+function stageDirective(stage, bp) {
+  switch (stage) {
+    case 'opening':
+      return `This is your FIRST turn — open the conversation. ${bp.openingStrategy} Never ask "what do you want to talk about?".`;
+    case 'personal_connection':
+      return 'React warmly to what they just said and ask a follow-up about THEM. Build the personal connection before any teaching.';
+    case 'explore':
+      return 'Explore the topic naturally within their comfort zone. Listen for a natural opening to use a target word later — do not force it yet.';
+    case 'introduce':
+      return 'If it fits the flow, work in ONE educational opportunity now: use a target word in a context that makes its meaning obvious, WITHOUT flagging it as new.';
+    case 'practice':
+      return 'Give them room to USE the new material themselves: ask a question that invites them to produce it.';
+    case 'confirm':
+      return 'Invite one more natural use to lightly confirm they can handle it. Keep it low-stakes and encouraging.';
+    case 'wrap':
+      return `Wrap up NATURALLY now: ${bp.exitStrategy} Refer back to something you actually talked about, and leave a warm thread for NEXT time (e.g. "下次跟我说说…"). Do NOT re-greet them, do NOT say the lesson is over, and do NOT give a summary or score.`;
+    default:
+      return '';
+  }
+}
+
+// Build the executor system prompt: Qwen PERFORMS the hidden blueprint turn-by-turn,
+// owning wording, curiosity, and tone, while the educational objectives stay
+// invisible. Replaces the old raw-vocab conductor prompt.
+function executorSystem({ blueprint, stage = 'explore', knownWords = [], profileDigest = '', scriptDirective = '' }) {
+  const known = knownWords.slice(0, 300).join(' ');
+  const opps = (blueprint.educationalOpportunities || []).slice(0, 3)
+    .map(o => `${o.objective}${o.vocab?.length ? ' [' + o.vocab.join(' ') + ']' : ''}`).join(' · ');
+  const conn = (blueprint.personalConnections || []).slice(0, 3).join('; ');
+  const nextRung = (blueprint.questionLadder || [])[0] || 'personal_experience';
   return [
-    'You are 老师 (Lǎoshī), a warm, patient Mandarin teacher for a ' + level + ' learner who wants to SPEAK and READ (no handwriting).',
-    'Speak mostly in simple Mandarin the learner can understand. Keep turns SHORT (1–2 sentences).',
-    'Comprehensible input rule: build sentences almost entirely from the KNOWN words below; introduce at most one or two new words per turn and make their meaning obvious from context.',
-    focus ? `Gently work these target words into the conversation when natural: ${focus}.` : '',
-    persona || '',
-    'When the learner makes a mistake, model the correct form naturally rather than lecturing.',
-    'Ask a simple question most turns to keep them talking. Never switch to being a generic AI assistant; stay in character as their teacher.',
-    'ALWAYS respond as strict JSON: {"hanzi": "...", "pinyin": "...", "english": "...", "note": "optional short tip or correction in English"}.',
-    'CRITICAL: "hanzi" MUST be Chinese characters only (never romanization); "pinyin" MUST be the matching romanization.',
-    'The learner leans on pinyin and English — EVERY reply MUST include full pinyin with tone marks AND a natural English translation. Never leave them empty.',
-    `Scene: ${scene}.`,
+    'You are 老师 (Lǎoshī), a warm Mandarin teacher who has an ONGOING relationship with THIS learner. You are continuing that relationship, NOT starting a lesson, and NOT a generic AI assistant.',
+    profileDigest ? `What you know about them (let it shape you; never recite it as data): ${profileDigest}` : '',
+    `The hidden aim of THIS conversation: ${blueprint.conversationGoal}.`,
+    conn ? `Personal hooks you may use: ${conn}.` : '',
+    opps ? `Educational opportunities to weave in ONLY when the conversation naturally invites them (never as the subject): ${opps}.` : '',
+    `Tone: ${blueprint.tone}.`,
+    stageDirective(stage, blueprint),
+    `When you ask a question, prefer a "${nextRung}" style question.`,
+    scriptDirective || 'Write primarily in pinyin with supporting hanzi.',
+    'Comprehensible input: build turns almost entirely from KNOWN words; introduce at most one new idea per turn and make its meaning obvious from context.',
+    'Keep every turn SHORT (1–2 sentences). Model corrections naturally instead of lecturing. Stay fully in character.',
+    'HARD RULES: never announce a lesson, a topic, or a "new word"; never present vocabulary as the subject; establish the personal connection before teaching; end most turns with a question.',
+    'ALWAYS respond as strict JSON: {"hanzi":"...","pinyin":"...","english":"...","note":"optional short English tip/correction"}.',
+    'CRITICAL: "hanzi" MUST contain Chinese characters only (never romanization); "pinyin" MUST contain the matching romanization with tone marks. Never put pinyin in the hanzi field.',
+    'The "pinyin" and "english" MUST correspond EXACTLY to the characters you wrote in "hanzi" — never romanize or translate a different sentence than the one in "hanzi". If you do not know the word for something, say it a simpler way using words you know rather than inventing one.',
+    'The learner leans on pinyin and English — EVERY reply MUST include full pinyin with tone marks AND a natural English translation. Never leave "pinyin" or "english" empty.',
     known ? `KNOWN words the learner has studied: ${known}` : 'The learner is a true beginner; use only the most basic words.',
   ].filter(Boolean).join('\n');
 }
 
-// Lesson-conductor system prompt. Laoshi runs a mini-lesson around ONE focal
-// concept and its neighborhood, reusing target vocabulary, surfacing related
-// characters naturally, and adapting its script to the learner's reading level.
-function conductorSystem({ plan, knownWords = [], persona = '' }) {
-  const target = (plan.targetVocab || []).map(v => `${v.hanzi} (${v.pinyin}) = ${v.gloss}`).join('; ');
-  const focal = plan.focal;
-  const families = (plan.patterns || []).flatMap(p => [p.semantic?.lesson, p.phonetic?.lesson].filter(Boolean)).slice(0, 3);
-  const known = knownWords.slice(0, 300).join(' ');
-  return [
-    'You are 老师 (Lǎoshī), a warm Mandarin teacher running a short, live mini-lesson — NOT a generic assistant.',
-    `Today's focal concept: ${focal.hanzi} (${focal.pinyin}) = ${focal.gloss}.`,
-    target && `Weave these connected words into the conversation naturally, reusing them more than once: ${target}.`,
-    families.length ? `When it fits, reinforce these patterns in passing: ${families.join(' ')}` : '',
-    persona || '',
-    plan.scriptDirective || 'Write primarily in pinyin with supporting hanzi.',
-    'Comprehensible input: build turns almost entirely from KNOWN words + the target words; introduce at most one new idea per turn and make its meaning obvious.',
-    'Keep every turn SHORT (1–2 sentences) and end most turns with a simple question so the learner keeps talking.',
-    'Model corrections naturally instead of lecturing. Stay fully in character as their teacher.',
-    'ALWAYS respond as strict JSON: {"hanzi":"...","pinyin":"...","english":"...","note":"optional short English tip/correction"}.',
-    'CRITICAL: "hanzi" MUST contain Chinese characters only (never romanization); "pinyin" MUST contain the matching romanization with tone marks. Never put pinyin in the hanzi field.',
-    (plan.scriptLevel ?? 0) < 0.5
-      ? 'The learner CANNOT read hanzi yet — they rely on pinyin and English. EVERY reply MUST include full pinyin with tone marks AND a natural English translation. Never leave "pinyin" or "english" empty.'
-      : 'Always fill "pinyin" and "english"; the learner may still lean on them.',
-    `Scene: ${plan.scene || 'everyday conversation'}.`,
-    known ? `KNOWN words: ${known}` : 'The learner is a true beginner; use only the most basic words.',
-  ].filter(Boolean).join('\n');
-}
-
-// One conductor turn within a lesson. Returns {hanzi, pinyin, english, note, via}.
-export async function laoshiLesson({ plan, history = [], userText = '', knownWords = [], persona = '' }) {
+// One executor turn: Qwen speaks the blueprint at the current stage. The single
+// code path for BOTH guided lessons and free chat. Returns {hanzi,pinyin,english,note,via}.
+export async function laoshiConverse({ blueprint, stage = 'explore', history = [], userText = '', knownWords = [], profileDigest = '', scriptDirective = '' }) {
   const messages = [
-    { role: 'system', content: conductorSystem({ plan, knownWords, persona }) },
+    { role: 'system', content: executorSystem({ blueprint, stage, knownWords, profileDigest, scriptDirective }) },
     ...history.slice(-10).map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })),
   ];
   if (userText) messages.push({ role: 'user', content: userText });
   return parseTeacher(await chat(messages, { temperature: 0.6, max_tokens: 400 }));
+}
+
+// Legacy shim: the current /api/lesson/turn hands a plan + persona. Build (or reuse)
+// a blueprint for the plan and route through the executor so nothing breaks during
+// the migration to the blueprint-native turn endpoint (Workstream E).
+export async function laoshiLesson({ plan, history = [], userText = '', knownWords = [], persona = '' }) {
+  const blueprint = plan.blueprint || await buildBlueprint(plan, {});
+  const exchanges = history.filter(m => m.role === 'user').length;
+  const stage = conversationStage({ exchanges, budget: blueprint.budget });
+  return laoshiConverse({ blueprint, stage, history, userText, knownWords,
+    profileDigest: profileForPrompt(), scriptDirective: plan.scriptDirective });
 }
 
 // Extract every top-level {...} object from a string (qwen3 sometimes emits one
@@ -171,13 +209,22 @@ function parseTeacher({ text, via }) {
   return { ...merged, via };
 }
 
-// One teacher turn. Returns {hanzi, pinyin, english, note, via}.
+// Free-chat teacher turn. Builds a MINIMAL blueprint internally so free chat and
+// guided lessons share one executor code path. Returns {hanzi,pinyin,english,note,via}.
 export async function laoshiReply({ history = [], userText = '', context = {} }) {
-  const messages = [
-    { role: 'system', content: laoshiSystem(context) },
-    // context may carry a persona directive (see index.js).
-    ...history.slice(-8).map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })),
-  ];
-  if (userText) messages.push({ role: 'user', content: userText });
-  return parseTeacher(await chat(messages, { temperature: 0.6, max_tokens: 400 }));
+  const minimalPlan = {
+    capability: null,
+    objectives: (context.focusWords || []).length
+      ? [{ objective: 'reuse familiar words in a natural chat', vocab: context.focusWords, pattern: null, priority: 1 }] : [],
+    focal: null,
+    targetVocab: (context.focusWords || []).map(h => ({ hanzi: h })),
+    reviewVocab: [],
+    scriptLevel: context.scriptLevel ?? 0,
+  };
+  const blueprint = buildBlueprintLocal(minimalPlan, {});
+  const exchanges = history.filter(m => m.role === 'user').length;
+  const stage = conversationStage({ exchanges, budget: blueprint.budget });
+  return laoshiConverse({ blueprint, stage, history, userText,
+    knownWords: context.knownWords || [], profileDigest: profileForPrompt(),
+    scriptDirective: context.scriptDirective || '' });
 }
