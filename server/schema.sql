@@ -194,3 +194,92 @@ CREATE TABLE IF NOT EXISTS pron_signals (
   accuracy     REAL
 );
 CREATE INDEX IF NOT EXISTS idx_pron_ts ON pron_signals(ts);
+
+-- ============================================================================
+-- Conversational architecture (capabilities + personal profile + blueprint)
+-- ============================================================================
+
+-- Capabilities are the TOP planning unit: an expressive thing the learner can do
+-- ("describe a living thing"). Vocabulary and grammar patterns are the MEANS to a
+-- capability, resolved at plan time. This decouples curriculum ("what they can
+-- say") from raw vocabulary lists ("which words").
+CREATE TABLE IF NOT EXISTS capabilities (
+  id                 INTEGER PRIMARY KEY,
+  slug               TEXT UNIQUE NOT NULL,
+  name               TEXT NOT NULL,       -- teacher-facing aim, e.g. "describe a living thing"
+  description        TEXT,
+  cefr_ish           TEXT,                -- rough band: A0 | A1 | A2 | B1 | B2
+  ordering           INTEGER DEFAULT 0,   -- survival → descriptive → narrative → opinion
+  prerequisites_json TEXT                 -- JSON array of prerequisite capability slugs
+);
+
+-- What a capability draws on. `kind` is 'vocab' | 'pattern' | 'capability'.
+-- `ref` is a resolvable token, not a hard word id:
+--   vocab:  "pos:a" (POS role), "topic:animals", or "word:好" (rare literal)
+--   pattern: a grammar pattern_tag, e.g. "de-attributive", "le-completion"
+--   capability: a sub-capability slug
+CREATE TABLE IF NOT EXISTS capability_requirements (
+  capability_id INTEGER NOT NULL,
+  kind          TEXT NOT NULL,
+  ref           TEXT NOT NULL,
+  weight        REAL DEFAULT 1.0,
+  FOREIGN KEY(capability_id) REFERENCES capabilities(id)
+);
+CREATE INDEX IF NOT EXISTS idx_cap_req ON capability_requirements(capability_id);
+
+-- Hidden per-learner capability mastery, analogous to word_mastery. A
+-- demonstration is an inferred instance of the learner actually expressing the
+-- capability in conversation.
+CREATE TABLE IF NOT EXISTS capability_mastery (
+  capability_id  INTEGER PRIMARY KEY,
+  score          REAL DEFAULT 0,        -- 0..1 EWMA of demonstrations
+  demonstrations INTEGER DEFAULT 0,
+  last_demo_at   TEXT,
+  FOREIGN KEY(capability_id) REFERENCES capabilities(id)
+);
+
+-- Durable, local memory of the PERSON (never shown as data; only shapes teaching).
+-- kind: 'fact' | 'interest' | 'preference' | 'thread'.
+CREATE TABLE IF NOT EXISTS personal_profile (
+  id            INTEGER PRIMARY KEY,
+  key           TEXT NOT NULL,          -- e.g. 'major', 'hobby', 'open_thread'
+  value         TEXT NOT NULL,          -- e.g. 'biology', 'hiking', 'planning a Chengdu trip'
+  kind          TEXT DEFAULT 'fact',
+  confidence    REAL DEFAULT 0.5,
+  source        TEXT DEFAULT 'inferred', -- 'stated' | 'inferred'
+  first_seen    TEXT,
+  last_seen     TEXT,
+  mention_count INTEGER DEFAULT 1,
+  UNIQUE(key, value)
+);
+
+-- One row per conversation. Holds the capability-keyed plan and the Director's
+-- blueprint so turns don't re-plan, plus the hidden lifecycle stage. This is the
+-- "session" the metrics attach to.
+CREATE TABLE IF NOT EXISTS conversation_sessions (
+  id             TEXT PRIMARY KEY,       -- generated session id
+  capability_id  INTEGER,
+  plan_json      TEXT,
+  blueprint_json TEXT,
+  stage          TEXT DEFAULT 'opening', -- opening→personal_connection→explore→introduce→practice→confirm→wrap
+  exchanges      INTEGER DEFAULT 0,
+  created        TEXT,
+  updated        TEXT,
+  ended_reason   TEXT
+);
+
+-- Hidden per-conversation metrics. Feed planning; never surfaced.
+CREATE TABLE IF NOT EXISTS conversation_metrics (
+  session_id                  TEXT PRIMARY KEY,
+  learner_initiated_questions INTEGER DEFAULT 0,
+  spontaneous_vocab           INTEGER DEFAULT 0,   -- target words used unprompted
+  avg_learner_len             REAL DEFAULT 0,
+  branches                    INTEGER DEFAULT 0,   -- learner-introduced topic pivots
+  corrections                 INTEGER DEFAULT 0,
+  capability_demos            INTEGER DEFAULT 0,
+  exchanges                   INTEGER DEFAULT 0,
+  max_question_rung           INTEGER DEFAULT 0,   -- highest question ladder rung reached
+  momentum                    REAL DEFAULT 1.0,
+  ended_reason                TEXT,                -- 'educational' | 'momentum' | 'budget' | 'fatigue'
+  created                     TEXT
+);
