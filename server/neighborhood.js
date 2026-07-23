@@ -219,11 +219,11 @@ export function buildLessonPlan() {
     focalId = capVocab.focal.wordId;
   } else {
     const f = pickFocal(introduced, known, dueSet);
-    focalId = f.id; focalTransfer = f.transfer || 0;
+    focalId = f?.id ?? null; focalTransfer = f?.transfer || 0;   // no fresh candidates → null focal
   }
 
   const focalRow = wordRow(focalId) || { wordId: focalId, hanzi: '', pinyin: '', gloss: '' };
-  const focalFull = db().prepare('SELECT audio_path FROM words WHERE id=?').get(focalId);
+  const focalFull = focalId ? db().prepare('SELECT audio_path FROM words WHERE id=?').get(focalId) : null;
   const focalForAssemble = { id: focalId, hanzi: focalRow.hanzi };
   const { reinforce, exposeRelated } = assemble(focalForAssemble, dueSet, known);
 

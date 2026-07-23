@@ -9,6 +9,7 @@ import { aiRateLimit } from './ratelimit.js';
 import { buildSession, buildLesson, submitReview, currentUnit, unitProgress } from './session.js';
 import { inferTraits, recordChannelSignal } from './learner.js';
 import { imageFor } from './images.js';
+import { recordChoiceOutcome } from './rung.js';
 import { knownWordIds } from './planner.js';
 import { runBackground } from './reasoner.js';
 import { laoshiReply, laoshiLesson, available as laoshiAvailable } from './qwen.js';
@@ -217,6 +218,12 @@ app.post('/api/signal/channel', wrap((req, res) => {
   const kind = req.body?.kind;
   if (kind !== 'reveal_text' && kind !== 'kept_audio') return res.status(400).json({ error: 'bad kind' });
   recordChannelSignal(kind);
+  res.json({ ok: true });
+}));
+
+// ---- Invisible comprehension signal (scaffolded-choice / rep outcome) → rung climb ----
+app.post('/api/signal/choice', wrap((req, res) => {
+  recordChoiceOutcome(Boolean(req.body?.correct));
   res.json({ ok: true });
 }));
 

@@ -51,6 +51,24 @@ const FUNCTION_GLOSS = {
   去: 'go', 来: 'come', 看: 'look', 吃: 'eat', 喝: 'drink', 说: 'say', 很多: 'many', 一点: 'a bit',
 };
 
+// Fallback pinyin for the core words + numbers/measures, so interlinear grounding is
+// guaranteed even if a word row is missing its reading. pinyinForHanzi (the word DB)
+// wins when present; this is the floor.
+const CORE_PINYIN = {
+  我: 'wǒ', 你: 'nǐ', 他: 'tā', 她: 'tā', 它: 'tā', 们: 'men',
+  这: 'zhè', 那: 'nà', 这个: 'zhège', 那个: 'nàge', 哪: 'nǎ', 哪个: 'nǎge',
+  是: 'shì', 不: 'bù', 没: 'méi', 有: 'yǒu', 的: 'de', 了: 'le',
+  吗: 'ma', 呢: 'ne', 吧: 'ba', 也: 'yě', 很: 'hěn', 和: 'hé', 都: 'dōu', 好: 'hǎo',
+  多少: 'duōshao', 几: 'jǐ', 什么: 'shénme', 谁: 'shéi', 喜欢: 'xǐhuan', 想: 'xiǎng',
+  要: 'yào', 会: 'huì', 在: 'zài', 去: 'qù', 来: 'lái', 看: 'kàn', 吃: 'chī', 喝: 'hē', 说: 'shuō',
+  个: 'gè', 只: 'zhī', 本: 'běn', 杯: 'bēi',
+  一: 'yī', 二: 'èr', 两: 'liǎng', 三: 'sān', 四: 'sì', 五: 'wǔ', 六: 'liù', 七: 'qī', 八: 'bā', 九: 'jiǔ', 十: 'shí',
+  你好: 'nǐhǎo', 谢谢: 'xièxie', 再见: 'zàijiàn', 对: 'duì', 请问: 'qǐngwèn',
+  现在: 'xiànzài', 今天: 'jīntiān', 明天: 'míngtiān', 昨天: 'zuótiān',
+  因为: 'yīnwèi', 所以: 'suǒyǐ', 但是: 'dànshì', 觉得: 'juéde', 可以: 'kěyǐ', 真: 'zhēn', 很多: 'hěnduō', 一点: 'yìdiǎn',
+};
+const py = (hanzi) => pinyinForHanzi(hanzi) || CORE_PINYIN[hanzi] || '';
+
 export function coreSet(rung = 0) {
   return new Set(rung >= 1 ? CORE_RUNG1 : CORE_RUNG0);
 }
@@ -116,7 +134,7 @@ export function validateTurn(hanzi, allowed) {
 export function groundTokens(hanzi, { newSet = new Set() } = {}) {
   return segment(hanzi).map(seg => ({
     hanzi: seg,
-    pinyin: pinyinForHanzi(seg) || '',
+    pinyin: py(seg),
     gloss: FUNCTION_GLOSS[seg] || cleanShort(glossForHanzi(seg)),
     isNew: newSet.has(seg),
     audioRef: null,
@@ -162,7 +180,7 @@ const FRAMES = [
 // never a puzzle. The learner can tap one instead of open production. `other` is a
 // second session noun (for a contrasting answer) when available.
 function choicesFor(frame, n, other) {
-  const tok = (hanzi) => ({ hanzi, pinyin: pinyinForHanzi(hanzi), gloss: glossEnglish(hanzi, n, other) });
+  const tok = (hanzi) => ({ hanzi, pinyin: py(hanzi) || pinyinForHanzi(cjkOnly(hanzi)), gloss: glossEnglish(hanzi, n, other) });
   switch (frame.kind) {
     case 'yesno':
       return [tok('对。'), tok('不是。'), other ? tok(`这是${other.hanzi}。`) : null].filter(Boolean);
@@ -203,9 +221,9 @@ export function buildFrameTurn({ rung = 0, sessionWords = [], turnIndex = 0, num
   const parts = frame.parts(nounTok(n), num);
 
   const tokens = parts.map(p => {
-    if (p.fixed) return { hanzi: p.hanzi, pinyin: pinyinForHanzi(p.hanzi) || '',
+    if (p.fixed) return { hanzi: p.hanzi, pinyin: /[。，？！、]/.test(p.hanzi) ? '' : py(p.hanzi),
       gloss: /[。，？！、]/.test(p.hanzi) ? '' : (FUNCTION_GLOSS[p.hanzi] || cleanShort(glossForHanzi(p.hanzi))), isNew: false, audioRef: null };
-    return { hanzi: p.hanzi, pinyin: p.pinyin || pinyinForHanzi(p.hanzi) || '', gloss: p.gloss, isNew: !!p.isNew, audioRef: null };
+    return { hanzi: p.hanzi, pinyin: p.pinyin || py(p.hanzi), gloss: p.gloss, isNew: !!p.isNew, audioRef: null };
   });
   const hanzi = tokens.map(t => t.hanzi).join('');
   return {
@@ -218,7 +236,7 @@ export function buildFrameTurn({ rung = 0, sessionWords = [], turnIndex = 0, num
     _frame: true,
   };
 }
-function nounTok(w) { return { hanzi: w.hanzi, pinyin: w.pinyin || pinyinForHanzi(w.hanzi), gloss: w.gloss || cleanShort(glossForHanzi(w.hanzi)), isNew: !!w.isNew }; }
+function nounTok(w) { return { hanzi: w.hanzi, pinyin: w.pinyin || py(w.hanzi), gloss: w.gloss || cleanShort(glossForHanzi(w.hanzi)), isNew: !!w.isNew }; }
 
 // ── Rung-0 word selection bias (§8) ─────────────────────────────────────────
 // Keep the graph+frequency+concreteness picker (newCandidates) but, at the bottom
