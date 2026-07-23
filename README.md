@@ -200,8 +200,22 @@ non-interactively.
 npm run dev
 ```
 
-- Web (Vite): http://localhost:5173
-- API (Express): http://localhost:5178 (proxied under `/api` and `/media`)
+- **Web (Vite): http://localhost:5173** ← open this
+- API (Express): http://localhost:5178 (proxied under `/api` and `/media`; opening it in a
+  browser just redirects to the app)
+
+On load you pick a **user** ("who's here?" — up to 5 people, no auth; each has fully
+isolated progress). A header **gear** toggles the invisible-pass model (Haiku ⇄ Sonnet) for
+playtesting; a **chip** switches person.
+
+### Sharing with a couple of testers
+
+```bash
+npm run share      # builds, serves app+api on one port, opens a Cloudflare quick tunnel
+```
+
+Prints a public `https://…trycloudflare.com` URL. See [docs/sharing.md](docs/sharing.md)
+(needs `cloudflared`; a per-session cap protects your keys; testers pick their own user).
 
 First launch sends you through **onboarding**: pick 2–3 interest topics, do a mic check,
 and choose a starting point (true beginner → Unit 1, or "I know some" → mark the first N
