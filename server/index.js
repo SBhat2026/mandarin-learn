@@ -1,8 +1,11 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { db, initSchema, MEDIA_DIR, getSetting, runAsUser, currentUserSlug } from './db.js';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { db, initSchema, MEDIA_DIR, getSetting, runAsUser, currentUserSlug, ROOT } from './db.js';
 import { listUsers, addUser, getUser, primarySlug, setUserPref } from './users.js';
+import { aiRateLimit } from './ratelimit.js';
 import { buildSession, buildLesson, submitReview, currentUnit, unitProgress } from './session.js';
 import { inferTraits, recordChannelSignal } from './learner.js';
 import { imageFor } from './images.js';
@@ -49,11 +52,19 @@ const wrap = (fn) => (req, res) => {
 
 app.get('/api/health', (req, res) => res.json({ ok: true, hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY) }));
 
-// The API server only owns /api and /media. The actual app is served by Vite (dev)
-// or the static build. Bounce a bare browser hit here to the web app so opening the
-// API port isn't a dead "Cannot GET /".
+// Serving the app itself. In dev, Vite serves it on :5173 and proxies /api here. For
+// SHARING (Cloudflare tunnel), it's simpler to expose ONE port: if a production build
+// exists (dist/), the API server also serves the SPA, so tunnelling :5178 gives
+// testers the whole app + api through a single origin. Otherwise, a bare hit to :5178
+// bounces to the Vite dev server.
+const DIST = join(ROOT, 'dist');
+// Serve the SPA from here only when explicitly asked (SERVE_APP=1, set by the share
+// script). In normal dev we redirect to Vite's live HMR app so a stale build can't
+// shadow it.
+const SERVE_APP = process.env.SERVE_APP === '1' && existsSync(join(DIST, 'index.html'));
 const WEB_ORIGIN = process.env.WEB_ORIGIN || 'http://localhost:5173';
-app.get('/', (req, res) => res.redirect(WEB_ORIGIN));
+if (SERVE_APP) app.use(express.static(DIST));
+else app.get('/', (req, res) => res.redirect(WEB_ORIGIN));
 
 app.get('/api/meta', (req, res) => res.json({
   topics: TOPICS,
@@ -119,7 +130,7 @@ app.get('/api/conversation/plan', wrap(async (req, res) => res.json(await startC
 
 // One executor turn: advances the hidden stage, may attach an inline rep or a framed
 // excursion, and signals shouldWrap when completion conditions fire (Workstream F).
-app.post('/api/conversation/turn', wrap(async (req, res) => {
+app.post('/api/conversation/turn', aiRateLimit, wrap(async (req, res) => {
   const { sessionId, history = [], userText = '', shouldWrap = false } = req.body || {};
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
   res.json(await conversationTurn({ id: sessionId, history, userText, shouldWrap }));
@@ -146,7 +157,7 @@ app.get('/api/lesson/plan', wrap((req, res) => {
 }));
 
 // legacy shim: one turn from a client-held plan, routed through the blueprint executor.
-app.post('/api/lesson/turn', wrap(async (req, res) => {
+app.post('/api/lesson/turn', aiRateLimit, wrap(async (req, res) => {
   const { plan, history = [], userText = '' } = req.body || {};
   if (!plan) return res.status(400).json({ error: 'plan required' });
   const reply = await laoshiLesson({ plan, history, userText, knownWords: knownWordStrings(), persona: personaDirective().directive });
@@ -180,7 +191,7 @@ app.post('/api/model/background', wrap(async (req, res) => res.json(await runBac
 // ---- Laoshi (Qwen conversational teacher) ----
 app.get('/api/laoshi/status', wrap(async (req, res) => res.json({ available: await laoshiAvailable(), scriptLevel: scriptLevel() })));
 
-app.post('/api/laoshi', wrap(async (req, res) => {
+app.post('/api/laoshi', aiRateLimit, wrap(async (req, res) => {
   const { history = [], userText = '', focus = [], scene } = req.body || {};
   // Constrain the teacher to what the learner knows (comprehensible input).
   const known = [...knownWordIds()];
@@ -245,5 +256,11 @@ app.post('/api/settings/model', wrap((req, res) => {
   res.json({ pref, richAvailable: richModelAvailable() });
 }));
 
+// SPA fallback: any non-/api GET returns index.html so client-side routing works
+// through the single shared origin (tunnel). Only when a build exists.
+if (SERVE_APP) {
+  app.get(/^(?!\/api|\/media).*/, (req, res) => res.sendFile(join(DIST, 'index.html')));
+}
+
 const PORT = process.env.PORT || 5178;
-app.listen(PORT, () => console.log(`API on http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`API on http://localhost:${PORT}${SERVE_APP ? ' (serving app + api)' : ''}`));

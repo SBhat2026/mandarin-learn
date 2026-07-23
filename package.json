@@ -16,6 +16,7 @@
     "migrate": "node scripts/migrate.js",
     "seed:capabilities": "node ingest/seed-capabilities.js",
     "dump:plan": "node scripts/dump-plan.js",
+    "share": "bash scripts/tunnel.sh",
     "data:fetch": "bash ingest/tools/fetch-open-data.sh",
     "data:build-decks": "node ingest/tools/build-open-decks.js",
     "ingest:apkg": "node ingest/import-apkg.js",
