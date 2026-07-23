@@ -52,17 +52,19 @@ function seedSessionWords(plan) {
     const tk = row && vocabToken(row.id);
     if (tk && !seen.has(tk.hanzi)) { out.push({ ...tk, isNew: false, callback: true }); seen.add(tk.hanzi); }
   }
+  // Keep the set SMALL (≤3) so each new word recurs several times across the short arc
+  // (within-session spacing — extra #1), instead of meeting many words once.
   for (const w of beginnerNewWords(5, { introduced })) {
     if (seen.has(w.hanzi)) continue;
     const tk = vocabToken(w.id);
     if (tk) { out.push({ ...tk, isNew: true }); seen.add(tk.hanzi); }
-    if (out.length >= 4) break;
+    if (out.length >= 3) break;
   }
   if (out.length < 2 && plan.focal?.wordId) {
     const tk = vocabToken(plan.focal.wordId);
     if (tk && !seen.has(tk.hanzi)) out.push({ ...tk, isNew: true });
   }
-  const picked = out.slice(0, 4);
+  const picked = out.slice(0, 3);
   for (const w of picked) if (w.wordId) createCardsForWord(w.wordId);
   return picked;
 }

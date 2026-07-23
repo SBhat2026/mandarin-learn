@@ -194,8 +194,9 @@ function glossEnglish(hanzi, n, other) {
   const map = { '对。': 'Right.', '不是。': "It isn't.", '好。': 'OK.', '我也有。': 'Me too.',
     '一个。': 'One.', '两个。': 'Two.', '三个。': 'Three.' };
   if (map[hanzi]) return map[hanzi];
-  if (other && hanzi.includes(other.hanzi)) return `This is ${other.gloss}.`;
   if (hanzi.includes('我有')) return `I have ${other?.gloss || n.gloss}.`;
+  if (hanzi.includes('这是') && other && hanzi.includes(other.hanzi)) return `This is ${other.gloss}.`;
+  if (other && hanzi.includes(other.hanzi)) return `${other.gloss}.`;
   return '';
 }
 
@@ -244,23 +245,31 @@ function nounTok(w) { return { hanzi: w.hanzi, pinyin: w.pinyin || py(w.hanzi), 
 // character load (1–2 chars), and exclude bare particles/abstract function words.
 // Picturability (an emoji anchor exists) is a strong, free signal of a decodable,
 // meetable beginner noun. No hand-curated syllabus.
+const NOUN_POS = new Set(['n', 'ns', 'nr', 'nz', 'nt']);
 export function beginnerNewWords(n = 3, { introduced } = {}) {
-  const cands = newCandidates(60, introduced);
-  const scored = [];
+  const cands = newCandidates(240, introduced);
+  const core = coreSet(1);                                       // never "meet" a function word
+  // Source `concrete` is noisy (many words default high), so PICTURABILITY (the curated
+  // emoji map) is the reliable rung-0 signal. Two tiers: picturable words first, then
+  // noun+concrete words only if we couldn't find enough picturable ones.
+  const picturableTier = [], nounTier = [];
   for (const c of cands) {
     const w = db().prepare('SELECT hanzi, freq_rank, concrete, particle, pos FROM words WHERE id=?').get(c.id);
-    if (!w || w.particle) continue;
+    if (!w || w.particle || core.has(w.hanzi)) continue;
     const charLen = [...w.hanzi].filter(isCjk).length;
     if (charLen > 2) continue;                                  // low character load
-    const concrete = w.concrete ?? 1;
+    // Must be a NOUN — a namable thing. This is what keeps verbs out: the emoji map
+    // whole-word-matches a gloss, so a verb with a noun in its gloss (扶 "support with
+    // the hand"→✋, 忍 "to bear"→🐻) would false-positive as picturable without this.
+    let isNoun = false; try { isNoun = JSON.parse(w.pos || '[]').some(p => NOUN_POS.has(p)); } catch {}
+    if (!isNoun) continue;
     const img = imageFor(w.hanzi);
-    const picturable = img.kind !== 'none';
-    if (concrete < 1 && !picturable) continue;                  // meetable/concrete only
-    const bias = c.score + 2.5 * (concrete) + (picturable ? 2.5 : 0) + (charLen === 1 ? 0.6 : 0);
-    scored.push({ id: c.id, hanzi: w.hanzi, score: bias, picturable });
+    if (img.kind !== 'none') picturableTier.push({ id: c.id, hanzi: w.hanzi, score: c.score + (charLen === 1 ? 0.6 : 0), picturable: true });
+    else if ((w.concrete ?? 0) >= 2) nounTier.push({ id: c.id, hanzi: w.hanzi, score: c.score, picturable: false });
   }
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, n);
+  picturableTier.sort((a, b) => b.score - a.score);
+  nounTier.sort((a, b) => b.score - a.score);
+  return [...picturableTier, ...nounTier].slice(0, n);
 }
 
 // Resolve a word id to a vocab token used by frames / meet-the-words.
