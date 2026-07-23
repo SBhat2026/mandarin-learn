@@ -64,6 +64,8 @@ export const api = STATIC ? {
   setModelPref: async (pref) => ({ pref, richAvailable: false }),
   users: () => Promise.resolve({ users: [{ slug: 'me', displayName: 'Demo', primary: true }], current: 'me', primary: 'me' }),
   addUser: async (displayName) => ({ user: { slug: 'demo', displayName }, users: [] }),
+  image: async () => ({ kind: 'none' }),
+  signalChannel: async () => ({ ok: true }),
 } : {
   meta: () => req('/api/meta'),
   home: () => req('/api/home'),
@@ -91,6 +93,8 @@ export const api = STATIC ? {
   setModelPref: (pref) => req('/api/settings/model', { method: 'POST', body: JSON.stringify({ pref }) }),
   users: () => req('/api/users'),
   addUser: (displayName) => req('/api/users', { method: 'POST', body: JSON.stringify({ displayName }) }),
+  image: (hanzi) => req('/api/image?hanzi=' + encodeURIComponent(hanzi)),
+  signalChannel: (kind) => req('/api/signal/channel', { method: 'POST', body: JSON.stringify({ kind }) }),
 };
 
 // Audio: real media is only present with the backend. In the demo, playAudio falls

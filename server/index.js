@@ -4,7 +4,8 @@ import cors from 'cors';
 import { db, initSchema, MEDIA_DIR, getSetting, runAsUser, currentUserSlug } from './db.js';
 import { listUsers, addUser, getUser, primarySlug, setUserPref } from './users.js';
 import { buildSession, buildLesson, submitReview, currentUnit, unitProgress } from './session.js';
-import { inferTraits } from './learner.js';
+import { inferTraits, recordChannelSignal } from './learner.js';
+import { imageFor } from './images.js';
 import { knownWordIds } from './planner.js';
 import { runBackground } from './reasoner.js';
 import { laoshiReply, laoshiLesson, available as laoshiAvailable } from './qwen.js';
@@ -196,6 +197,17 @@ app.post('/api/throttle/evaluate', wrap((req, res) => res.json(evaluateThrottle(
 
 // ---- Dictionary ----
 app.get('/api/lookup', wrap((req, res) => res.json({ term: req.query.term, results: lookup(req.query.term) })));
+
+// ---- Image anchor for a concrete noun (emoji-first; 'none' otherwise) ----
+app.get('/api/image', wrap((req, res) => res.json(imageFor(String(req.query.hanzi || '')))));
+
+// ---- Invisible modality signal (audio-first reveal vs kept) ----
+app.post('/api/signal/channel', wrap((req, res) => {
+  const kind = req.body?.kind;
+  if (kind !== 'reveal_text' && kind !== 'kept_audio') return res.status(400).json({ error: 'bad kind' });
+  recordChannelSignal(kind);
+  res.json({ ok: true });
+}));
 
 // ---- Reading passages ----
 app.get('/api/reading', wrap((req, res) => res.json({ passages: passages({}) })));

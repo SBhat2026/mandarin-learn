@@ -8,7 +8,7 @@ import { buildBlueprint } from './director.js';
 import { profileForPrompt } from './profile.js';
 import { laoshiConverse, conversationStage } from './qwen.js';
 import { knownWordIds, refreshStage } from './planner.js';
-import { scriptDirective, scriptLevel } from './learner.js';
+import { scriptDirective, scriptLevel, presentationBias } from './learner.js';
 import { detectUsed } from './conversation.js';
 import { capabilityMastery, pendingUnlock, markUnlockAcked } from './capabilities.js';
 import { buildExercise, cleanGloss } from './exercises.js';
@@ -100,7 +100,15 @@ export async function conversationTurn({ id, userText = '', history = [], forceW
   const inlineRep = (stage === 'practice' && prevStage !== 'practice') ? buildInlineRep(plan) : null;
   const excursion = (stage === 'confirm' && prevStage !== 'confirm') ? buildExcursion(plan, blueprint) : null;
 
-  return { ...reply, used, stage, shouldWrap, wrapReason: completion.reason, inlineRep, excursion };
+  // Audio-first listening (Workstream I): occasionally deliver a turn audio-only
+  // (text hidden behind tap-to-reveal) for auditory-leaning learners, in the middle
+  // of the conversation, and never while they're struggling. Automatic, no setting.
+  const pres = presentationBias();
+  const midConversation = stage === 'explore' || stage === 'introduce' || stage === 'practice';
+  const audioFirst = !!reply.hanzi && midConversation && calibration > -0.2
+    && pres.audioFirstProb > 0 && Math.random() < pres.audioFirstProb;
+
+  return { ...reply, used, stage, shouldWrap, wrapReason: completion.reason, inlineRep, excursion, audioFirst };
 }
 
 // A single recognition rep on a focal/target word, wired to the real scheduler via

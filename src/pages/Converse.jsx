@@ -17,6 +17,8 @@ export default function Converse({ onFallback }) {
   const [done, setDone] = useState(false);
   const [excursion, setExcursion] = useState(null);  // active framed excursion
   const [popover, setPopover] = useState(null);      // {term, results, x, y}
+  const [revealed, setRevealed] = useState({});      // audio-first bubbles the learner opened
+  const inputRef = useRef(null);
   const scroller = useRef(null);
   const opened = useRef(false);
   const pendingSpoken = useRef(null);
@@ -41,10 +43,23 @@ export default function Converse({ onFallback }) {
       .map(i => ({ role: i.role, content: i.role === 'user' ? i.hanzi : (i.hanzi + ' ' + (i.english || '')) }));
   }
 
+  // Reveal a hidden audio-first teacher bubble; the reveal itself is a modality signal
+  // (leaning on text). Not revealing before moving on signals comfort with listening.
+  function reveal(i) {
+    if (revealed[i]) return;
+    setRevealed(r => ({ ...r, [i]: true }));
+    api.signalChannel('reveal_text').catch(() => {});
+  }
+
   async function turn(text, opening = false, spoken = null, sid = sessionId) {
     if (busy || !sid) return;
     const history = historyFor();
     if (!opening) {
+      // If the previous teacher turn was audio-only and never revealed, the learner
+      // handled it by ear — a hidden "auditory-comfortable" signal.
+      const last = items[items.length - 1];
+      const lastIdx = items.length - 1;
+      if (last?.role === 'assistant' && last.audioFirst && !revealed[lastIdx]) api.signalChannel('kept_audio').catch(() => {});
       setItems(prev => [...prev, { role: 'user', hanzi: text }]);
       if (spoken) api.pronObserve({ spoken: { ...spoken, transcript: text }, targetVocab: [] }).catch(() => {});
     }
@@ -53,7 +68,7 @@ export default function Converse({ onFallback }) {
       const reply = await api.conversationTurn({ sessionId: sid, history, userText: opening ? '' : text });
       if (!reply.hanzi && reply.english?.includes('backend')) { onFallback?.(); return; }
       setItems(prev => {
-        const next = [...prev, { role: 'assistant', hanzi: reply.hanzi, pinyin: reply.pinyin, english: reply.english, note: reply.note }];
+        const next = [...prev, { role: 'assistant', hanzi: reply.hanzi, pinyin: reply.pinyin, english: reply.english, note: reply.note, audioFirst: reply.audioFirst }];
         if (reply.inlineRep) next.push({ type: 'rep', rep: reply.inlineRep });
         return next;
       });
@@ -120,11 +135,22 @@ export default function Converse({ onFallback }) {
               <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-md bg-ink text-white"><span className="hanzi text-lg">{it.hanzi}</span></div>
             </div>
           );
+          const hidden = it.audioFirst && !revealed[i];
           return (
             <div key={i} className="flex justify-start">
               <div className="max-w-[85%] px-4 py-3 rounded-2xl rounded-bl-md bg-white border border-line">
-                <TeacherText hanzi={it.hanzi} pinyin={it.pinyin} english={it.english} mode={scriptMode} onChar={lookupChar} onSpeak={() => speak(it.hanzi)} />
-                {it.note && <div className="text-[12px] text-jade-600 mt-2 border-t border-line pt-2">💡 {it.note}</div>}
+                {hidden ? (
+                  <button onClick={() => { speak(it.hanzi); }} onDoubleClick={() => reveal(i)}
+                    className="flex items-center gap-3 text-left">
+                    <span className="w-9 h-9 shrink-0 rounded-full bg-ink text-white grid place-items-center">🔊</span>
+                    <span className="text-[13px] text-ink-soft">Listen first — tap to replay, <button onClick={(e) => { e.stopPropagation(); reveal(i); }} className="text-jade-600 underline">show text</button></span>
+                  </button>
+                ) : (
+                  <>
+                    <TeacherText hanzi={it.hanzi} pinyin={it.pinyin} english={it.english} mode={scriptMode} onChar={lookupChar} onSpeak={() => speak(it.hanzi)} />
+                    {it.note && <div className="text-[12px] text-jade-600 mt-2 border-t border-line pt-2">💡 {it.note}</div>}
+                  </>
+                )}
               </div>
             </div>
           );
@@ -141,6 +167,12 @@ export default function Converse({ onFallback }) {
       ) : (
         <div className="mt-3">
           {listening && <div className="text-center text-sm text-rose-500 mb-2 animate-pulse">Listening… speak now</div>}
+          {/* Expression-gap affordance: ask, in English, how to say something. Laoshi
+              teaches the phrase in-flow and reuses it. */}
+          <button type="button" onClick={() => { setInput('How do I say '); inputRef.current?.focus(); }}
+            className="mb-2 text-[12px] text-ink-soft hover:text-ink border border-line rounded-full px-3 py-1 bg-white/70">
+            💬 Help me say something…
+          </button>
           <div className="flex items-center gap-2">
             {canSpeak && (
               <button type="button" onClick={mic} disabled={busy}
@@ -150,7 +182,7 @@ export default function Converse({ onFallback }) {
                 title="Speak">🎤</button>
             )}
             <form onSubmit={(e) => { e.preventDefault(); submitTyped(); }} className="flex-1 flex items-center gap-2">
-              <input value={input} onChange={(e) => { setInput(e.target.value); pendingSpoken.current = null; }}
+              <input ref={inputRef} value={input} onChange={(e) => { setInput(e.target.value); pendingSpoken.current = null; }}
                 placeholder={canSpeak ? 'Tap 🎤 to speak, or type…' : 'Reply in Chinese or English…'}
                 className="flex-1 px-4 py-3 rounded-full border border-line bg-white focus:outline-none focus:border-ink/40 hanzi" />
               <button type="submit" disabled={busy || !input.trim()} className="w-12 h-12 shrink-0 rounded-full bg-ink text-white grid place-items-center disabled:opacity-40">↑</button>
@@ -182,11 +214,17 @@ function TeacherText({ hanzi, pinyin, english, mode, onChar, onSpeak }) {
 
 function WordPopover({ popover }) {
   const { results, x, y, term } = popover;
+  const [anchor, setAnchor] = useState(null);   // small image anchor for a concrete noun
+  useEffect(() => { let ok = true; api.image(term).then(r => ok && r?.kind !== 'none' && setAnchor(r)).catch(() => {}); return () => { ok = false; }; }, [term]);
   const top = Math.min(y + 6, (typeof window !== 'undefined' ? window.innerHeight : 800) - 160);
   return (
     <div className="fixed z-40 w-64 p-3 rounded-2xl bg-white border border-line shadow-lift text-sm" style={{ left: Math.max(8, Math.min(x, (typeof window !== 'undefined' ? window.innerWidth : 400) - 264)), top }} onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center justify-between mb-1">
-        <span className="hanzi text-xl text-ink">{term}</span>
+        <span className="hanzi text-xl text-ink flex items-center gap-2">
+          {term}
+          {anchor?.kind === 'emoji' && <span className="text-lg" title="picture">{anchor.value}</span>}
+          {anchor?.kind === 'url' && <img src={anchor.value} alt="" className="w-8 h-8 rounded object-cover" />}
+        </span>
         <button onClick={() => speak(term)} className="text-xs text-ink-faint hover:text-ink">🔊</button>
       </div>
       {results.length ? results.map((r, i) => (
@@ -203,6 +241,8 @@ function WordPopover({ popover }) {
 // straight back into the conversation and updates real scheduling.
 function InlineRep({ rep }) {
   const [answered, setAnswered] = useState(null);
+  const [anchor, setAnchor] = useState(null);
+  useEffect(() => { let ok = true; api.image(rep.hanzi).then(r => ok && r?.kind !== 'none' && setAnchor(r)).catch(() => {}); return () => { ok = false; }; }, [rep.hanzi]);
   async function answer(opt) {
     if (answered) return;
     const correct = opt === rep.gloss;
@@ -215,6 +255,8 @@ function InlineRep({ rep }) {
         <div className="flex items-center gap-2 mb-2">
           <button onClick={() => (rep.audio ? playAudio({ audio_path: rep.audio, hanzi: rep.hanzi }) : speak(rep.hanzi))} className="w-8 h-8 rounded-full bg-white border border-line grid place-items-center text-sm">🔊</button>
           <span className="hanzi text-2xl text-ink">{rep.hanzi}</span>
+          {anchor?.kind === 'emoji' && <span className="text-xl" title="picture">{anchor.value}</span>}
+          {anchor?.kind === 'url' && <img src={anchor.value} alt="" className="w-7 h-7 rounded object-cover" />}
           <span className="text-sm text-ink-soft"><TonedPinyin pinyin={rep.pinyin} /></span>
         </div>
         <div className="flex flex-wrap gap-1.5">

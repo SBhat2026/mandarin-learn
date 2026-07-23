@@ -107,6 +107,56 @@ export function modalityBias() {
   return bias;
 }
 
+// ── Automatic modality emphasis (Workstream J) ──────────────────────────────
+// Infer the learner's stronger CHANNEL (read-write/visual vs auditory) purely from
+// behavior — no setting. Signals accumulate in learner_model.channel_obs:
+//   reveal_text : they tapped to reveal hidden text (leaning on reading)
+//   kept_audio  : they answered/continued from an audio-only turn without revealing
+//                 (comfortable listening)
+// Blended with per-dimension ability (listening vs reading) so it self-corrects.
+export function recordChannelSignal(kind) {
+  const obs = getModel('channel_obs', { reveal_text: 0, kept_audio: 0 }) || { reveal_text: 0, kept_audio: 0 };
+  if (kind === 'reveal_text') obs.reveal_text = (obs.reveal_text || 0) + 1;
+  else if (kind === 'kept_audio') obs.kept_audio = (obs.kept_audio || 0) + 1;
+  else return obs;
+  setModel('channel_obs', obs);
+  return obs;
+}
+
+// Presentation bias derived from channel behavior + ability. Drives how readily text/
+// pinyin show, whether audio autoplays, and how often a turn is delivered audio-first.
+// Converges quietly on the learner's real preference; hidden. Defaults are neutral.
+export function presentationBias() {
+  const obs = getModel('channel_obs', { reveal_text: 0, kept_audio: 0 }) || {};
+  const reveals = obs.reveal_text || 0, kept = obs.kept_audio || 0;
+  const behaviorN = reveals + kept;
+  // Behavioral lean in [-1,1]: + = auditory-comfortable, - = text-reliant.
+  const behavior = behaviorN >= 3 ? (kept - reveals) / behaviorN : 0;
+
+  // Ability lean: listening ability minus reading ability (if known).
+  const t = traits();
+  const ab = t?.dimAbility;
+  let ability = 0;
+  if (ab?.listening?.ability != null && ab?.reading?.ability != null) {
+    ability = clamp((ab.listening.ability - ab.reading.ability) * 2, -1, 1);
+  }
+  const lean = clamp(0.6 * behavior + 0.4 * ability, -1, 1);   // + auditory, - visual
+  const confidence = clamp(behaviorN / 8 + (ab ? 0.3 : 0), 0, 1);
+
+  return {
+    channel: lean > 0.25 ? 'auditory' : lean < -0.25 ? 'visual' : 'balanced',
+    lean, confidence,
+    autoplay: true,                                   // audio always available; cheap
+    // Only hide-text-first for auditory-leaning learners, and only once we have some
+    // signal. Visual learners never get audio-first (they rely on reading).
+    audioFirstProb: lean > 0.15 ? Math.min(0.4, 0.5 * lean) * confidence : 0,
+    // Image anchors help visual learners most, but are broadly gentle — show when not
+    // strongly auditory.
+    images: lean < 0.4,
+  };
+}
+const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+
 // Continuous acquisition stage (0..4). Derived, then persisted for fast reads.
 //   0 first-exposure · 1 familiar · 2 recall · 3 functional · 4 automatic
 export function computeStage(wordId, card) {
