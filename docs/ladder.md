@@ -47,6 +47,24 @@ word recurs (within-session spacing) → **recombination win** (say something ne
 today's words) → wrap. Honest cross-session callback: the next session's opener reuses one
 of yesterday's words (`last_session_words`), never an invented memory.
 
+## Vocab-graph conversation continuity (`server/graphwalk.js`)
+A real conversation drifts through related ideas. `graphNeighbors` / `nextConcepts` walk
+the 83k-edge graph (sentence co-occurrence > collocation > topic > shared character) from
+the words in play to the most natural next concept, preferring comprehensible *reuse* over
+*growth*. Used three ways, all hidden:
+- **Guided** — `connectedBeginnerCluster` seeds meet-words that are graph-connected (each
+  reinforces the last) while staying picturable/decodable.
+- **Free** — `graphSteer` gives the executor a soft "you could drift toward X" nudge;
+  `conversationMemory` (what the learner actually said) lets Laoshi refer back.
+- **Across sessions** — a new guided session grows OUTWARD from a graph-neighbour of last
+  time's word (honest callback, real relationship).
+`test/graphwalk.test.js`.
+
+## Human-like Laoshi (`qwen.js` executor)
+Backchannels (嗯、真的？、我也是), reacting to feeling not just words, not quizzing every
+turn, letting topics wander — layered on the comprehensible-input rules. Model tiers:
+FAST = Haiku, RICH = Sonnet (`claude-sonnet-5`), per-user toggle.
+
 ## No fabricated context (`director.js`, `qwen.js`)
 Zero-profile opens from a concrete grounded scene; both the Director and the executor
 carry explicit no-invented-history rules. Guarded by `test/nofabricate.test.js`.
