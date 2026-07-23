@@ -19,8 +19,9 @@ import { buildExercise, cleanGloss } from './exercises.js';
 import { weakTone, buildToneDrill } from './tone.js';
 import { liveCompletion, computeCalibration } from './momentum.js';
 import { currentRung, rungKnobs } from './rung.js';
-import { allowedSet, buildFrameTurn, groundTokens, beginnerNewWords, vocabToken, validateTurn } from './vocabguard.js';
+import { allowedSet, buildFrameTurn, groundTokens, beginnerNewWords, vocabToken, validateTurn, segment } from './vocabguard.js';
 import { classifyIntent, regroundReply, expressionGapReply } from './intent.js';
+import { graphNeighbors, graphSteer, nextConcepts } from './graphwalk.js';
 
 function genId() {
   return 'c_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -33,6 +34,34 @@ function knownStrings(limit = 400) {
     : [];
 }
 
+// The word ids actually IN PLAY this conversation — segment every turn's Chinese and
+// resolve to word ids, plus the plan's target vocab. Feeds the graph-walk continuity.
+function inPlayWordIds(transcript = [], plan = {}) {
+  const ids = new Set((plan.targetVocab || []).map(v => v.wordId).filter(Boolean));
+  const lookup = db().prepare('SELECT id FROM words WHERE hanzi=?');
+  for (const t of transcript) {
+    const text = t.hanzi || t.content || '';
+    for (const seg of segment(text)) { const w = lookup.get(seg); if (w) ids.add(w.id); }
+  }
+  return [...ids];
+}
+
+// A compact, human "what we've been talking about" — the content words the LEARNER
+// produced — so Laoshi can refer back to something specific instead of sounding generic.
+function conversationMemory(transcript = []) {
+  const lookup = db().prepare("SELECT gloss, english FROM words WHERE hanzi=? AND (gloss IS NOT NULL OR english IS NOT NULL)");
+  const seen = new Set(), bits = [];
+  for (const t of transcript) {
+    if (t.role !== 'user') continue;
+    for (const seg of segment(t.hanzi || t.content || '')) {
+      if (seg.length < 1 || seen.has(seg)) continue;
+      const w = lookup.get(seg); if (!w) continue;
+      seen.add(seg); bits.push(`${seg} (${cleanGloss(w)})`);
+    }
+  }
+  return bits.slice(-6).join(', ');
+}
+
 // Per-conversation ladder state (rung, this session's introduced words, turn index)
 // lives in the per-user KV store keyed by session id — no schema change, isolated
 // per user. Cleared implicitly when a new conversation starts.
@@ -40,24 +69,26 @@ const ladderKey = (id) => `ladder:${id}`;
 const getLadder = (id) => getModel(ladderKey(id), null);
 const setLadder = (id, s) => setModel(ladderKey(id), s);
 
-// Seed 2–4 concrete, picturable words for a guided session. Reuses ONE word from the
-// previous session (honest spaced callback — extra #1) so yesterday's words resurface,
-// then adds fresh beginner words. Cards are created so the words enter scheduling.
+// Seed a small, GRAPH-CONNECTED cluster of concrete/picturable words for a guided
+// session — each word reinforces the last (shared topic/character/co-occurrence) so the
+// set feels like one little world, not three random flashcards. Reuses ONE word from the
+// previous session (honest spaced callback) and grows OUTWARD along the graph from it,
+// so sessions chain like a real relationship. Cards are created so words enter scheduling.
 function seedSessionWords(plan) {
   const introduced = introducedWordIds();
   const out = [], seen = new Set();
   const callback = getModel('last_session_words', []) || [];
+  let anchorId = null;
   for (const h of callback.slice(0, 1)) {
     const row = db().prepare('SELECT id FROM words WHERE hanzi=?').get(h);
     const tk = row && vocabToken(row.id);
-    if (tk && !seen.has(tk.hanzi)) { out.push({ ...tk, isNew: false, callback: true }); seen.add(tk.hanzi); }
+    if (tk && !seen.has(tk.hanzi)) { out.push({ ...tk, isNew: false, callback: true }); seen.add(tk.hanzi); anchorId = row.id; }
   }
-  // Keep the set SMALL (≤3) so each new word recurs several times across the short arc
-  // (within-session spacing — extra #1), instead of meeting many words once.
-  for (const w of beginnerNewWords(5, { introduced })) {
+  // Keep the set SMALL (≤3) so each new word recurs several times (within-session
+  // spacing); prefer words graph-connected to the anchor (or to each other).
+  for (const w of connectedBeginnerCluster(introduced, anchorId, 3 - out.length)) {
     if (seen.has(w.hanzi)) continue;
-    const tk = vocabToken(w.id);
-    if (tk) { out.push({ ...tk, isNew: true }); seen.add(tk.hanzi); }
+    out.push({ ...w, isNew: true }); seen.add(w.hanzi);
     if (out.length >= 3) break;
   }
   if (out.length < 2 && plan.focal?.wordId) {
@@ -67,6 +98,37 @@ function seedSessionWords(plan) {
   const picked = out.slice(0, 3);
   for (const w of picked) if (w.wordId) createCardsForWord(w.wordId);
   return picked;
+}
+
+// A connected cluster of picturable beginner nouns: start from the best picturable word
+// (or a picturable graph-neighbour of the anchor), then prefer further picturable words
+// that are graph-connected to what's chosen. Falls back to top picturable when the graph
+// offers no picturable neighbour, so decodability is never sacrificed for connectedness.
+function connectedBeginnerCluster(introduced, anchorId, n = 3) {
+  if (n <= 0) return [];
+  const pool = beginnerNewWords(10, { introduced });          // picturable nouns, ranked
+  if (!pool.length) return [];
+  const byId = new Map(pool.map(p => [p.id, p]));
+  const chosen = [];
+  // If we have a callback anchor, start from a picturable neighbour of it (grow outward).
+  if (anchorId) {
+    const nbr = graphNeighbors(anchorId, { limit: 60 }).find(x => byId.has(x.wordId));
+    if (nbr) chosen.push(byId.get(nbr.wordId));
+  }
+  if (!chosen.length) chosen.push(pool[0]);
+  while (chosen.length < n) {
+    const have = new Set(chosen.map(c => c.id));
+    // neighbours (in the picturable pool) of anything already chosen.
+    let nextW = null;
+    for (const c of chosen) {
+      const nb = graphNeighbors(c.id, { limit: 60 }).find(x => byId.has(x.wordId) && !have.has(x.wordId));
+      if (nb) { nextW = byId.get(nb.wordId); break; }
+    }
+    if (!nextW) nextW = pool.find(p => !have.has(p.id));      // fall back to top picturable
+    if (!nextW) break;
+    chosen.push(nextW);
+  }
+  return chosen.slice(0, n).map(p => vocabToken(p.id)).filter(Boolean);
 }
 
 // A warm, HONEST opening: reuse yesterday's words if we truly have them, else a
@@ -251,8 +313,15 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap }) {
     else if (stage === 'explore' && calibration >= 0.5 && exchanges >= 2) stage = 'introduce';
   }
 
+  // Vocab-graph continuity: from the words actually in play this conversation, pick the
+  // most natural adjacent concept and offer it to the executor as a soft steer, so the
+  // chat drifts through RELATED ideas (like a real conversation) instead of a fixed list.
+  const inPlay = inPlayWordIds(soFar, plan);
+  const steer = graphSteer(inPlay, { known: knownWordIds(), introduced: introducedWordIds() });
+  const memory = conversationMemory(soFar);
+
   const reply = await laoshiConverse({
-    blueprint, stage, history, userText,
+    blueprint, stage, history, userText, graphSteer: steer, conversationMemory: memory,
     knownWords: knownStrings(), profileDigest: profileForPrompt(), scriptDirective: plan.scriptDirective,
   });
   const used = detectUsed(reply, plan.targetVocab || []);

@@ -148,7 +148,7 @@ function calibrationDirective(signal) {
 // Build the executor system prompt: Qwen PERFORMS the hidden blueprint turn-by-turn,
 // owning wording, curiosity, and tone, while the educational objectives stay
 // invisible. Replaces the old raw-vocab conductor prompt.
-function executorSystem({ blueprint, stage = 'explore', knownWords = [], profileDigest = '', scriptDirective = '' }) {
+function executorSystem({ blueprint, stage = 'explore', knownWords = [], profileDigest = '', scriptDirective = '', graphSteer = '', conversationMemory = '' }) {
   const known = knownWords.slice(0, 300).join(' ');
   const opps = (blueprint.educationalOpportunities || []).slice(0, 3)
     .map(o => `${o.objective}${o.vocab?.length ? ' [' + o.vocab.join(' ') + ']' : ''}`).join(' · ');
@@ -183,6 +183,10 @@ function executorSystem({ blueprint, stage = 'explore', knownWords = [], profile
     scene,
     mayNarrate,
     calib,
+    // Vocab-graph continuity (invisible): a naturally-adjacent concept to drift toward.
+    graphSteer || '',
+    // Conversational memory: refer back to something specific they actually said.
+    conversationMemory ? `Earlier in THIS chat they mentioned: ${conversationMemory}. Refer back to one of these naturally when it fits — it shows you were listening.` : '',
     `When you ask a question, prefer a "${nextRung}" style question.`,
     scriptDirective || 'Write primarily in pinyin with supporting hanzi.',
     // WORDING (Workstream C): the 9.7B model tends to reach for literary flourish.
@@ -190,12 +194,14 @@ function executorSystem({ blueprint, stage = 'explore', knownWords = [], profile
     'WORDING: use SIMPLE, common, everyday words and short natural sentences. Avoid literary, idiomatic, or stylistic flourish and rare vocabulary unless the learner is clearly advanced. Clarity and reusability beat sounding impressive — say things the way a kind teacher would to a beginner.',
     'Comprehensible input: build turns almost entirely from KNOWN words; introduce at most one new idea per turn and make its meaning obvious from context.',
     'Keep every turn SHORT (1–2 sentences). Model corrections naturally instead of lecturing. Stay fully in character.',
+    // Human-likeness: sound like a warm friend, not a textbook or a quiz machine.
+    'BE HUMAN: react to how they seem to FEEL, not just to the words. Use light, natural backchannels sometimes (嗯、真的？、哈哈、我也是) and small personal reactions. Vary your turns — do NOT ask a question every single time; sometimes just react, share a tiny bit of yourself, or make a warm comment, then let them respond. Let the topic wander naturally the way friends chat.',
     // Communicative production coaching (Workstream I) — the core mechanic: help them
     // SAY WHAT THEY MEAN. Not drills.
     'EXPRESSION-GAP: if the learner asks in English how to say something (e.g. "how do I say I\'m tired?"), teach JUST that phrase simply — give it in hanzi+pinyin+english, invite them to try saying it, and then USE it yourself naturally in your very next line so it sticks.',
     'CIRCUMLOCUTION: if the learner is stuck for a word, FIRST encourage them to say it another way with words they already know ("用你会的词说说看"), and only then offer the target word and gently recast their sentence — training them not to freeze.',
     'RECAST: when they make a mistake, model the correct version naturally inside your reply (a gentle aside in "note" at most) — never grade or lecture.',
-    'HARD RULES: never announce a lesson, a topic, or a "new word"; never present vocabulary as the subject; establish the personal connection before teaching; end most turns with a question.',
+    'HARD RULES: never announce a lesson, a topic, or a "new word"; never present vocabulary as the subject; establish the personal connection before teaching; keep them talking — usually (not always) leave an easy opening for them to reply.',
     'NO FABRICATED HISTORY: never invent shared past events or personal facts that are not in the profile above or earlier in THIS conversation (no "did you go to…", "how was your weekend…", "last time you…"). With no real personal hook, open from the concrete here-and-now instead of a made-up memory.',
     'ALWAYS respond as strict JSON: {"hanzi":"...","pinyin":"...","english":"...","note":"optional short English tip/correction"}.',
     'CRITICAL: "hanzi" MUST contain Chinese characters only (never romanization); "pinyin" MUST contain the matching romanization with tone marks. Never put pinyin in the hanzi field.',
@@ -207,9 +213,9 @@ function executorSystem({ blueprint, stage = 'explore', knownWords = [], profile
 
 // One executor turn: Qwen speaks the blueprint at the current stage. The single
 // code path for BOTH guided lessons and free chat. Returns {hanzi,pinyin,english,note,via}.
-export async function laoshiConverse({ blueprint, stage = 'explore', history = [], userText = '', knownWords = [], profileDigest = '', scriptDirective = '' }) {
+export async function laoshiConverse({ blueprint, stage = 'explore', history = [], userText = '', knownWords = [], profileDigest = '', scriptDirective = '', graphSteer = '', conversationMemory = '' }) {
   const messages = [
-    { role: 'system', content: executorSystem({ blueprint, stage, knownWords, profileDigest, scriptDirective }) },
+    { role: 'system', content: executorSystem({ blueprint, stage, knownWords, profileDigest, scriptDirective, graphSteer, conversationMemory }) },
     ...history.slice(-10).map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })),
   ];
   if (userText) messages.push({ role: 'user', content: userText });
