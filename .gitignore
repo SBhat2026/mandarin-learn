@@ -6,6 +6,7 @@ data/app.db
 data/app.db-wal
 data/app.db-shm
 data/media/
+data/users/
 ingest/sources/*
 !ingest/sources/.gitkeep
 test/fixtures/

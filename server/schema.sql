@@ -268,6 +268,14 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
   ended_reason   TEXT
 );
 
+-- Capability unlock moments (Workstream G): fire the in-character "you can now…"
+-- acknowledgement exactly once per capability.
+CREATE TABLE IF NOT EXISTS capability_unlocks (
+  capability_id INTEGER PRIMARY KEY,
+  unlocked_at   TEXT,
+  acknowledged  INTEGER DEFAULT 0
+);
+
 -- Hidden per-conversation metrics. Feed planning; never surfaced.
 CREATE TABLE IF NOT EXISTS conversation_metrics (
   session_id                  TEXT PRIMARY KEY,

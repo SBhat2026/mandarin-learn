@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { db, initSchema, MEDIA_DIR, getSetting } from './db.js';
+import { db, initSchema, MEDIA_DIR, getSetting, runAsUser, currentUserSlug } from './db.js';
+import { listUsers, addUser, getUser, primarySlug, setUserPref } from './users.js';
 import { buildSession, buildLesson, submitReview, currentUnit, unitProgress } from './session.js';
 import { inferTraits } from './learner.js';
 import { knownWordIds } from './planner.js';
@@ -25,6 +26,17 @@ initSchema();
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Route every request to the active user's databases. The client sends the chosen
+// user slug in `x-user`; unknown/missing falls back to the primary user. The whole
+// downstream handler runs inside this user's AsyncLocalStorage context, so db()
+// resolves correctly without any per-call user plumbing.
+app.use((req, res, next) => {
+  const slug = req.get('x-user');
+  const active = slug && getUser(slug) ? slug : primarySlug();
+  runAsUser(active, () => next());
+});
+
 app.use('/media', express.static(MEDIA_DIR));
 
 const wrap = (fn) => (req, res) => {
@@ -35,6 +47,12 @@ const wrap = (fn) => (req, res) => {
 };
 
 app.get('/api/health', (req, res) => res.json({ ok: true, hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY) }));
+
+// The API server only owns /api and /media. The actual app is served by Vite (dev)
+// or the static build. Bounce a bare browser hit here to the web app so opening the
+// API port isn't a dead "Cannot GET /".
+const WEB_ORIGIN = process.env.WEB_ORIGIN || 'http://localhost:5173';
+app.get('/', (req, res) => res.redirect(WEB_ORIGIN));
 
 app.get('/api/meta', (req, res) => res.json({
   topics: TOPICS,
@@ -194,6 +212,15 @@ app.get('/api/tone', wrap((req, res) => {
 app.get('/api/onboarding', wrap((req, res) => res.json(onboardingState())));
 app.post('/api/onboarding', wrap((req, res) => res.json(saveOnboarding(req.body || {}))));
 
+// ---- Multi-user (max 5, no auth): who's here + add a person ----
+app.get('/api/users', wrap((req, res) => res.json({ users: listUsers(), current: currentUserSlug(), primary: primarySlug() })));
+app.post('/api/users', wrap((req, res) => {
+  const name = String(req.body?.displayName || '').trim();
+  if (!name) return res.status(400).json({ error: 'name required' });
+  try { res.json({ user: addUser(name), users: listUsers() }); }
+  catch (e) { res.status(409).json({ error: e.message }); }
+}));
+
 // ---- Playtesting: invisible-pass model tier (Haiku ⇄ Sonnet), per-user ----
 app.get('/api/settings/model', wrap((req, res) => res.json({
   pref: claudeModelPref(),
@@ -201,7 +228,8 @@ app.get('/api/settings/model', wrap((req, res) => res.json({
   hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
 })));
 app.post('/api/settings/model', wrap((req, res) => {
-  const pref = setClaudeModelPref(req.body?.pref);
+  const pref = setClaudeModelPref(req.body?.pref);   // per-user learner_model (authoritative)
+  setUserPref(currentUserSlug(), pref);              // mirror to registry for the picker
   res.json({ pref, richAvailable: richModelAvailable() });
 }));
 

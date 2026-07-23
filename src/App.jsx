@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { api, isDemo } from './lib/api.js';
+import { api, isDemo, currentUser } from './lib/api.js';
 import Home from './pages/Home.jsx';
 import Session from './pages/Session.jsx';
 import ToneTrainer from './pages/ToneTrainer.jsx';
@@ -8,6 +8,8 @@ import Reading from './pages/Reading.jsx';
 import Stats from './pages/Stats.jsx';
 import Onboarding from './pages/Onboarding.jsx';
 import SettingsGear from './components/SettingsGear.jsx';
+import Login from './components/Login.jsx';
+import UserChip from './components/UserChip.jsx';
 
 // One primary action — talking with Laoshi — with the practice tools kept secondary.
 const tabs = [
@@ -20,15 +22,24 @@ const tabs = [
 
 export default function App() {
   const [meta, setMeta] = useState(null);
+  // Multi-user gate: require a chosen local user before loading the app (skipped in
+  // the static demo, which has no backend / user routing).
+  const [user, setUser] = useState(isDemo ? 'demo' : currentUser());
   const navigate = useNavigate();
   const loc = useLocation();
 
   useEffect(() => {
+    if (!user) return;   // wait for a user to be picked
     api.meta().then(m => {
       setMeta(m);
       if (!m.onboarding?.onboarded && m.counts.units > 0) navigate('/onboarding');
     }).catch(() => setMeta({ error: true }));
-  }, []);
+  }, [user]);
+
+  // Switching user reloads everyone's data cleanly.
+  function onSwitch() { window.location.reload(); }
+
+  if (!user) return <Login onPick={setUser} />;
 
   const onOnboarding = loc.pathname === '/onboarding';
 
@@ -51,7 +62,10 @@ export default function App() {
                 </NavLink>
               ))}
             </nav>
-            <div className="ml-auto"><SettingsGear /></div>
+            <div className="ml-auto flex items-center gap-1.5">
+              <SettingsGear />
+              {!isDemo && <UserChip onSwitch={onSwitch} />}
+            </div>
           </div>
         </header>
       )}

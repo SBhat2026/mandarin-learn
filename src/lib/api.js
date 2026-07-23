@@ -6,8 +6,17 @@ const BASE = import.meta.env.BASE_URL || '/';
 
 export const isDemo = STATIC;
 
+// The active local user (multi-user, no auth). Stored client-side and sent on every
+// request so the backend routes to that user's databases.
+const USER_KEY = 'mandarin.user';
+export function currentUser() { try { return localStorage.getItem(USER_KEY) || ''; } catch { return ''; } }
+export function setCurrentUser(slug) { try { slug ? localStorage.setItem(USER_KEY, slug) : localStorage.removeItem(USER_KEY); } catch {} }
+
 async function req(path, opts) {
-  const res = await fetch(path, { headers: { 'content-type': 'application/json' }, ...opts });
+  const headers = { 'content-type': 'application/json' };
+  const u = currentUser();
+  if (u) headers['x-user'] = u;
+  const res = await fetch(path, { ...opts, headers: { ...headers, ...(opts?.headers || {}) } });
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
   return res.json();
 }
@@ -53,6 +62,8 @@ export const api = STATIC ? {
   saveOnboarding: async () => ({ ok: true, demo: true }),
   modelSettings: () => Promise.resolve({ pref: 'fast', richAvailable: false, hasApiKey: false }),
   setModelPref: async (pref) => ({ pref, richAvailable: false }),
+  users: () => Promise.resolve({ users: [{ slug: 'me', displayName: 'Demo', primary: true }], current: 'me', primary: 'me' }),
+  addUser: async (displayName) => ({ user: { slug: 'demo', displayName }, users: [] }),
 } : {
   meta: () => req('/api/meta'),
   home: () => req('/api/home'),
@@ -78,6 +89,8 @@ export const api = STATIC ? {
   saveOnboarding: (body) => req('/api/onboarding', { method: 'POST', body: JSON.stringify(body) }),
   modelSettings: () => req('/api/settings/model'),
   setModelPref: (pref) => req('/api/settings/model', { method: 'POST', body: JSON.stringify({ pref }) }),
+  users: () => req('/api/users'),
+  addUser: (displayName) => req('/api/users', { method: 'POST', body: JSON.stringify({ displayName }) }),
 };
 
 // Audio: real media is only present with the backend. In the demo, playAudio falls
