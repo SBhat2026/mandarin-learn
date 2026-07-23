@@ -32,6 +32,7 @@ You do NOT talk to the learner. You produce a hidden plan that Laoshi (a separat
 Design principles you MUST encode into the plan:
 - NEVER announce a lesson, topic, objective, or "new word". The learner must feel they are continuing a relationship, not starting a lesson.
 - Establish a PERSONAL connection FIRST, using a real fact/thread about the learner, before any educational steering.
+- NEVER fabricate personal history. If there is no real profile fact/thread, DO NOT invent one (no "did you go to…", "how was your trip…", "last time you…"). For a cold-start / low-data learner, open from a CONCRETE, GROUNDED micro-scene in the here-and-now — warm and system-led, honest, not a fake memory.
 - Educational objectives stay HIDDEN — vocabulary is woven in only when the conversation naturally needs it, never presented as the subject.
 - Optimize for the desiredLearnerFeeling: "I had an interesting conversation," not "I finished a lesson."
 - Keep it achievable in a short chat; wrap up warmly and naturally when the goals are met or momentum fades.`;
@@ -117,7 +118,7 @@ export function buildBlueprintLocal(plan, ctx = {}) {
     ? `Pick up the open thread naturally — ask how "${threads[0]}" is going.`
     : interest
       ? `Open by connecting to something they like (${interest}) and ask a warm question about it.`
-      : `Open warmly and personally about their day or something concrete in everyday life; ask one easy question. Never open with a generic "so, what shall we discuss?" prompt.`;
+      : `No real profile facts exist yet, so DO NOT invent any personal history or past events. Open from a concrete, grounded thing in the here-and-now (something simple and everyday) and ask one easy question about it. Never fabricate a memory, and never open with a generic "so, what shall we discuss?" prompt.`;
 
   return {
     conversationGoal: goal,

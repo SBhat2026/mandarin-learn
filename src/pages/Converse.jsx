@@ -3,21 +3,23 @@ import { api } from '../lib/api.js';
 import { playAudio, speak, normalizeHanzi, captureSpoken, spokenCaptureSupported } from '../lib/speech.js';
 import { TonedPinyin, ScriptBubble, scriptModeFromLevel } from '../components/Toned.jsx';
 
-// One continuous conversation with Laoshi. The guided lesson and free chat are the
-// same surface: a single thread where light reps appear inline as chat bubbles and
-// heavier activities open as gently-framed excursions. No lesson announcements, no
-// target-word chips, no scores — the educational plan stays entirely hidden.
+// One continuous conversation with Laoshi, laid out as a LADDER. At the guided rungs
+// (0/1) every teacher sentence is rendered word-by-word (interlinear: hanzi / pinyin /
+// gloss), new words are met in a small strip before they're used, and the learner can
+// tap a ready-made reply — never forced into production they can't do, never stranded.
+// At the free rung (2) it collapses to a plain sentence with tap-to-reveal. No lesson
+// announcements, no scores — the plan stays hidden.
 export default function Converse({ onFallback }) {
-  const [session, setSession] = useState(null);      // {sessionId, scriptLevel, hasThread}
-  const [items, setItems] = useState([]);            // thread: {role|type, ...}
+  const [session, setSession] = useState(null);
+  const [items, setItems] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [listening, setListening] = useState(false);
   const [level, setLevel] = useState(0);
   const [done, setDone] = useState(false);
-  const [excursion, setExcursion] = useState(null);  // active framed excursion
-  const [popover, setPopover] = useState(null);      // {term, results, x, y}
-  const [revealed, setRevealed] = useState({});      // audio-first bubbles the learner opened
+  const [excursion, setExcursion] = useState(null);
+  const [popover, setPopover] = useState(null);
+  const [revealed, setRevealed] = useState({});
   const inputRef = useRef(null);
   const scroller = useRef(null);
   const opened = useRef(false);
@@ -26,8 +28,6 @@ export default function Converse({ onFallback }) {
   const scriptMode = scriptModeFromLevel(session?.scriptLevel);
   const canSpeak = spokenCaptureSupported();
 
-  // Start the conversation: build plan + blueprint server-side, then fetch the
-  // personal opening turn. Feels like resuming, not launching.
   useEffect(() => {
     if (opened.current) return; opened.current = true;
     api.conversationPlan()
@@ -37,14 +37,11 @@ export default function Converse({ onFallback }) {
   }, []);
   useEffect(() => { scroller.current?.scrollTo(0, scroller.current.scrollHeight); }, [items, busy]);
 
-  // Dialogue history for the model = only real conversational turns (not reps).
   function historyFor() {
     return items.filter(i => i.role === 'user' || i.role === 'assistant')
       .map(i => ({ role: i.role, content: i.role === 'user' ? i.hanzi : (i.hanzi + ' ' + (i.english || '')) }));
   }
 
-  // Reveal a hidden audio-first teacher bubble; the reveal itself is a modality signal
-  // (leaning on text). Not revealing before moving on signals comfort with listening.
   function reveal(i) {
     if (revealed[i]) return;
     setRevealed(r => ({ ...r, [i]: true }));
@@ -55,8 +52,6 @@ export default function Converse({ onFallback }) {
     if (busy || !sid) return;
     const history = historyFor();
     if (!opening) {
-      // If the previous teacher turn was audio-only and never revealed, the learner
-      // handled it by ear — a hidden "auditory-comfortable" signal.
       const last = items[items.length - 1];
       const lastIdx = items.length - 1;
       if (last?.role === 'assistant' && last.audioFirst && !revealed[lastIdx]) api.signalChannel('kept_audio').catch(() => {});
@@ -68,25 +63,38 @@ export default function Converse({ onFallback }) {
       const reply = await api.conversationTurn({ sessionId: sid, history, userText: opening ? '' : text });
       if (!reply.hanzi && reply.english?.includes('backend')) { onFallback?.(); return; }
       setItems(prev => {
-        const next = [...prev, { role: 'assistant', hanzi: reply.hanzi, pinyin: reply.pinyin, english: reply.english, note: reply.note, audioFirst: reply.audioFirst }];
+        const next = [...prev, {
+          role: 'assistant',
+          hanzi: reply.hanzi, pinyin: reply.pinyin, english: reply.english, note: reply.note,
+          tokens: reply.tokens, newWords: reply.newWords, choices: reply.choices,
+          intro: reply.intro, outro: reply.outro, reground: reply.reground, followFrame: reply.followFrame,
+          invite: reply.invite, rung: reply.rung, knobs: reply.knobs, audioFirst: reply.audioFirst,
+        }];
         if (reply.inlineRep) next.push({ type: 'rep', rep: reply.inlineRep });
         return next;
       });
-      if (reply.hanzi) speak(reply.hanzi);
+      if (reply.intro?.hanzi) speak(reply.intro.hanzi);
+      const say = reply.followFrame?.hanzi || reply.hanzi;
+      if (say) setTimeout(() => speak(say), reply.intro?.hanzi ? 900 : 0);
       if (reply.excursion) setExcursion(reply.excursion);
       if (reply.shouldWrap) finish(sid, reply.wrapReason);
     } catch { onFallback?.(); } finally { setBusy(false); }
   }
 
-  // A framed excursion just closed → auto-post its in-character bridge back into
-  // the thread and continue, so it feels like the teacher handed you something.
+  // Tap a scaffolded choice → send it as the learner's turn. A confident pick is a
+  // hidden comprehension signal that helps the ladder decide when to fade scaffolding.
+  function chooseChip(choice) {
+    if (busy || done) return;
+    api.signalChoice(true).catch(() => {});
+    turn(choice.hanzi, false, null);
+  }
+
   function returnFromExcursion(ex) {
     setExcursion(null);
     const b = ex.exitBridge;
     if (b?.hanzi) { setItems(prev => [...prev, { role: 'assistant', hanzi: b.hanzi, pinyin: b.pinyin, english: b.english }]); speak(b.hanzi); }
   }
 
-  // Natural close: no score screen. Run the invisible post-hoc inference.
   function finish(sid = sessionId, endedReason = null) {
     setDone(true);
     const transcript = items.filter(i => i.role === 'user' || i.role === 'assistant');
@@ -119,6 +127,7 @@ export default function Converse({ onFallback }) {
   }
 
   const micScale = 1 + Math.min(0.5, level * 5);
+  const lastAssistantIdx = items.reduce((acc, it, i) => (it.role === 'assistant' ? i : acc), -1);
 
   return (
     <div className="flex flex-col h-[calc(100vh-9rem)] animate-fade" onClick={() => popover && setPopover(null)}>
@@ -135,24 +144,12 @@ export default function Converse({ onFallback }) {
               <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-md bg-ink text-white"><span className="hanzi text-lg">{it.hanzi}</span></div>
             </div>
           );
-          const hidden = it.audioFirst && !revealed[i];
           return (
-            <div key={i} className="flex justify-start">
-              <div className="max-w-[85%] px-4 py-3 rounded-2xl rounded-bl-md bg-white border border-line">
-                {hidden ? (
-                  <button onClick={() => { speak(it.hanzi); }} onDoubleClick={() => reveal(i)}
-                    className="flex items-center gap-3 text-left">
-                    <span className="w-9 h-9 shrink-0 rounded-full bg-ink text-white grid place-items-center">🔊</span>
-                    <span className="text-[13px] text-ink-soft">Listen first — tap to replay, <button onClick={(e) => { e.stopPropagation(); reveal(i); }} className="text-jade-600 underline">show text</button></span>
-                  </button>
-                ) : (
-                  <>
-                    <TeacherText hanzi={it.hanzi} pinyin={it.pinyin} english={it.english} mode={scriptMode} onChar={lookupChar} onSpeak={() => speak(it.hanzi)} />
-                    {it.note && <div className="text-[12px] text-jade-600 mt-2 border-t border-line pt-2">💡 {it.note}</div>}
-                  </>
-                )}
-              </div>
-            </div>
+            <TeacherBubble key={i} it={it} idx={i} scriptMode={scriptMode}
+              hiddenAudio={it.audioFirst && !revealed[i]}
+              onReveal={() => reveal(i)} onChar={lookupChar}
+              isLast={i === lastAssistantIdx && !done}
+              onChoose={chooseChip} />
           );
         })}
         {busy && <div className="text-ink-faint text-sm px-2">老师…</div>}
@@ -161,14 +158,11 @@ export default function Converse({ onFallback }) {
       {popover && <WordPopover popover={popover} />}
       {excursion && <Excursion excursion={excursion} onDone={() => returnFromExcursion(excursion)} scriptMode={scriptMode} />}
 
-      {/* Composer — collapses into a soft close affordance when the talk winds down. */}
       {done ? (
         <div className="mt-4 text-center text-ink-soft text-sm py-4 border-t border-line">聊到这儿 · 明天见</div>
       ) : (
         <div className="mt-3">
           {listening && <div className="text-center text-sm text-rose-500 mb-2 animate-pulse">Listening… speak now</div>}
-          {/* Expression-gap affordance: ask, in English, how to say something. Laoshi
-              teaches the phrase in-flow and reuses it. */}
           <button type="button" onClick={() => { setInput('How do I say '); inputRef.current?.focus(); }}
             className="mb-2 text-[12px] text-ink-soft hover:text-ink border border-line rounded-full px-3 py-1 bg-white/70">
             💬 Help me say something…
@@ -194,8 +188,117 @@ export default function Converse({ onFallback }) {
   );
 }
 
-// Teacher text: the reading experience (ScriptBubble) plus per-character tap-to-look-up
-// so beginners cope without the UI ever announcing vocabulary.
+// One teacher bubble. Assembles, in order: an intro lead-in, the meet-the-words strip,
+// the (re-grounded) interlinear sentence, and tap-to-say choices. Falls back to the
+// plain reveal view at the free rung.
+function TeacherBubble({ it, idx, scriptMode, hiddenAudio, onReveal, onChar, isLast, onChoose }) {
+  const interlinear = it.knobs?.interlinear && it.knobs.interlinear !== 'reveal';
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[88%] px-4 py-3 rounded-2xl rounded-bl-md bg-white border border-line space-y-2">
+        {hiddenAudio ? (
+          <button onClick={() => speak(it.hanzi)} onDoubleClick={onReveal} className="flex items-center gap-3 text-left">
+            <span className="w-9 h-9 shrink-0 rounded-full bg-ink text-white grid place-items-center">🔊</span>
+            <span className="text-[13px] text-ink-soft">Listen first — tap to replay, <button onClick={(e) => { e.stopPropagation(); onReveal(); }} className="text-jade-600 underline">show text</button></span>
+          </button>
+        ) : (
+          <>
+            {it.intro?.hanzi && <IntroLine line={it.intro} />}
+            {it.newWords?.length > 0 && <MeetWords words={it.newWords} />}
+            {it.reground && (
+              <div className="rounded-xl bg-amber-50/60 border border-amber-100 px-3 py-2">
+                <div className="text-[11px] text-amber-700/80 mb-1">let's break it down</div>
+                <Interlinear tokens={it.reground.tokens} />
+              </div>
+            )}
+            {interlinear
+              ? <Interlinear tokens={(it.followFrame?.tokens) || it.tokens} english={(it.followFrame?.english) || it.english} />
+              : <TeacherText hanzi={it.hanzi} pinyin={it.pinyin} english={it.english} mode={scriptMode} onChar={onChar} onSpeak={() => speak(it.hanzi)} />}
+            {it.outro?.hanzi && <IntroLine line={it.outro} muted />}
+            {it.note && <div className="text-[12px] text-jade-600 border-t border-line pt-2">💡 {it.note}</div>}
+            {isLast && it.choices?.length > 0 && <Choices choices={it.choices} invite={it.invite} onChoose={onChoose} />}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// A small warm lead-in / send-off line (grounded, spoken on arrival).
+function IntroLine({ line, muted }) {
+  return (
+    <button onClick={() => speak(line.hanzi)} className={`block text-left ${muted ? 'opacity-80' : ''}`}>
+      <span className="hanzi text-[15px] text-ink">{line.hanzi}</span>
+      <span className="text-[12px] text-ink-faint ml-2">{line.english}</span>
+    </button>
+  );
+}
+
+// Meet-the-words: introduce each new word (emoji/image + hanzi + pinyin + gloss + audio)
+// BEFORE it is used in a sentence. Not a game — just a gentle "here are the words".
+function MeetWords({ words }) {
+  return (
+    <div className="flex gap-2 flex-wrap py-1">
+      {words.map((w, i) => (
+        <button key={i} onClick={() => (w.audioRef ? playAudio({ audio_path: w.audioRef, hanzi: w.hanzi }) : speak(w.hanzi))}
+          className={`flex flex-col items-center px-3 py-2 rounded-2xl border text-center transition min-w-[64px] ${
+            w.isNew ? 'bg-jade-50/70 border-jade-200' : 'bg-white border-line'}`} title="Tap to hear">
+          <span className="text-lg leading-none mb-0.5">{w.imageRef?.kind === 'emoji' ? w.imageRef.value : '🔊'}</span>
+          <span className="hanzi text-xl text-ink leading-tight">{w.hanzi}</span>
+          <span className="text-[11px] text-jade-700"><TonedPinyin pinyin={w.pinyin} /></span>
+          <span className="text-[11px] text-ink-faint">{w.gloss}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Interlinear: render each word as a stacked unit — hanzi / colored pinyin / English
+// gloss — new words highlighted, each tappable to replay its own audio. This is the
+// per-word grounding that makes a beginner sentence decodable.
+function Interlinear({ tokens = [], english }) {
+  if (!tokens.length) return null;
+  return (
+    <div>
+      <div className="flex flex-wrap items-end gap-x-1 gap-y-1.5">
+        {tokens.map((t, i) => {
+          const punct = /^[。，？！、：；·]+$/.test(t.hanzi);
+          if (punct) return <span key={i} className="hanzi text-xl text-ink self-end pb-1">{t.hanzi}</span>;
+          return (
+            <button key={i} onClick={() => speak(t.hanzi)}
+              className={`flex flex-col items-center px-1 rounded-lg hover:bg-ink/5 ${t.isNew ? 'bg-jade-50' : ''}`} title="Tap to hear">
+              {t.pinyin && <span className={`text-[11px] leading-tight ${t.isNew ? 'text-jade-700' : 'text-ink-faint'}`}><TonedPinyin pinyin={t.pinyin} /></span>}
+              <span className={`hanzi text-xl leading-tight ${t.isNew ? 'text-jade-800' : 'text-ink'}`}>{t.hanzi}</span>
+              {t.gloss && <span className="text-[10px] leading-tight text-ink-faint/90 max-w-[72px] truncate">{t.gloss}</span>}
+            </button>
+          );
+        })}
+      </div>
+      {english && <div className="text-[12px] text-ink-faint/80 mt-1.5">{english}</div>}
+    </div>
+  );
+}
+
+// Scaffolded responses: glossed tap-to-say chips. Tapping sends it as the learner's
+// turn. No scoring, no "correct/wrong" — just ready ways to reply so they're never stuck.
+function Choices({ choices, invite, onChoose }) {
+  return (
+    <div className="pt-1.5 border-t border-line/70">
+      {invite && <div className="text-[11px] text-jade-700 mb-1">你试试看 · your turn — tap to say it</div>}
+      <div className="flex flex-wrap gap-1.5">
+        {choices.map((c, i) => (
+          <button key={i} onClick={() => onChoose(c)}
+            className="px-3 py-1.5 rounded-full text-left border border-line bg-white hover:border-jade-300 hover:bg-jade-50/50 transition">
+            <span className="hanzi text-[15px] text-ink">{c.hanzi}</span>
+            {c.gloss && <span className="text-[11px] text-ink-faint ml-1.5">{c.gloss}</span>}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Free-rung plain sentence + per-character tap-to-look-up (tap-to-reveal reading).
 function TeacherText({ hanzi, pinyin, english, mode, onChar, onSpeak }) {
   const cjk = [...(hanzi || '')];
   return (
@@ -214,7 +317,7 @@ function TeacherText({ hanzi, pinyin, english, mode, onChar, onSpeak }) {
 
 function WordPopover({ popover }) {
   const { results, x, y, term } = popover;
-  const [anchor, setAnchor] = useState(null);   // small image anchor for a concrete noun
+  const [anchor, setAnchor] = useState(null);
   useEffect(() => { let ok = true; api.image(term).then(r => ok && r?.kind !== 'none' && setAnchor(r)).catch(() => {}); return () => { ok = false; }; }, [term]);
   const top = Math.min(y + 6, (typeof window !== 'undefined' ? window.innerHeight : 800) - 160);
   return (
@@ -237,8 +340,6 @@ function WordPopover({ popover }) {
   );
 }
 
-// Inline light rep: a recognition check rendered as a chat bubble. Answering flows
-// straight back into the conversation and updates real scheduling.
 function InlineRep({ rep }) {
   const [answered, setAnswered] = useState(null);
   const [anchor, setAnchor] = useState(null);
@@ -248,6 +349,7 @@ function InlineRep({ rep }) {
     const correct = opt === rep.gloss;
     setAnswered({ opt, correct });
     api.review({ cardId: rep.cardId, rating: correct ? 3 : 2, dimension: 'meaning', exercise: 'recognition', durationMs: 0 }).catch(() => {});
+    api.signalChoice(correct).catch(() => {});
   }
   return (
     <div className="flex justify-start">
@@ -279,9 +381,6 @@ function InlineRep({ rep }) {
   );
 }
 
-// Framed heavy excursion: a gently-framed sheet over the conversation. Feels like
-// the teacher handed you something, not like you navigated to a tab. Two kinds:
-// a tone-drill (minimal pairs) and a shadowing run (listen-and-repeat sentences).
 function Excursion({ excursion, onDone, scriptMode }) {
   if (excursion.kind !== 'tone_drill' && excursion.kind !== 'shadowing') { onDone(); return null; }
   const enter = excursion.enterLine;
@@ -310,8 +409,6 @@ function Excursion({ excursion, onDone, scriptMode }) {
   );
 }
 
-// Listen-and-repeat. Play each sentence, then tap 🎤 to echo it; the utterance is
-// sent to the invisible pronunciation observer (no score is ever shown).
 function Shadowing({ shadow }) {
   const [busyIdx, setBusyIdx] = useState(-1);
   const [heard, setHeard] = useState({});

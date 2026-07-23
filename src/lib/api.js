@@ -66,6 +66,7 @@ export const api = STATIC ? {
   addUser: async (displayName) => ({ user: { slug: 'demo', displayName }, users: [] }),
   image: async () => ({ kind: 'none' }),
   signalChannel: async () => ({ ok: true }),
+  signalChoice: async () => ({ ok: true }),
 } : {
   meta: () => req('/api/meta'),
   home: () => req('/api/home'),
@@ -95,6 +96,7 @@ export const api = STATIC ? {
   addUser: (displayName) => req('/api/users', { method: 'POST', body: JSON.stringify({ displayName }) }),
   image: (hanzi) => req('/api/image?hanzi=' + encodeURIComponent(hanzi)),
   signalChannel: (kind) => req('/api/signal/channel', { method: 'POST', body: JSON.stringify({ kind }) }),
+  signalChoice: (correct) => req('/api/signal/choice', { method: 'POST', body: JSON.stringify({ correct }) }),
 };
 
 // Audio: real media is only present with the backend. In the demo, playAudio falls
