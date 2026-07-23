@@ -238,27 +238,74 @@ function InlineRep({ rep }) {
 }
 
 // Framed heavy excursion: a gently-framed sheet over the conversation. Feels like
-// the teacher handed you something, not like you navigated to a tab.
+// the teacher handed you something, not like you navigated to a tab. Two kinds:
+// a tone-drill (minimal pairs) and a shadowing run (listen-and-repeat sentences).
 function Excursion({ excursion, onDone, scriptMode }) {
-  if (excursion.kind !== 'tone_drill') { onDone(); return null; }
+  if (excursion.kind !== 'tone_drill' && excursion.kind !== 'shadowing') { onDone(); return null; }
   const enter = excursion.enterLine;
   return (
     <div className="fixed inset-0 z-30 flex items-end sm:items-center justify-center bg-ink/20 backdrop-blur-sm p-4" onClick={onDone}>
       <div className="w-full max-w-md rounded-3xl bg-white border border-line shadow-lift p-6 animate-rise" onClick={(e) => e.stopPropagation()}>
         <div className="mb-4"><ScriptBubble hanzi={enter.hanzi} pinyin={enter.pinyin} english={enter.english} mode={scriptMode} /></div>
-        <div className="space-y-2">
-          {excursion.drill.items.flatMap(g => g.pair).slice(0, 6).map((w, i) => (
-            <button key={i} onClick={() => playAudio({ audio_path: w.audio_path, hanzi: w.hanzi })}
-              className="w-full flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-white border border-line hover:border-ink/30 text-left">
-              <span className="w-7 h-7 rounded-full bg-ink/5 grid place-items-center text-xs">🔊</span>
-              <span className="hanzi text-xl text-ink">{w.hanzi}</span>
-              <span className="text-sm text-ink-soft">{w.pinyin}</span>
-              <span className="text-[13px] text-ink-faint ml-auto">{(w.english || '').slice(0, 18)}</span>
-            </button>
-          ))}
-        </div>
+        {excursion.kind === 'shadowing'
+          ? <Shadowing shadow={excursion.shadow} />
+          : (
+            <div className="space-y-2">
+              {excursion.drill.items.flatMap(g => g.pair).slice(0, 6).map((w, i) => (
+                <button key={i} onClick={() => playAudio({ audio_path: w.audio_path, hanzi: w.hanzi })}
+                  className="w-full flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-white border border-line hover:border-ink/30 text-left">
+                  <span className="w-7 h-7 rounded-full bg-ink/5 grid place-items-center text-xs">🔊</span>
+                  <span className="hanzi text-xl text-ink">{w.hanzi}</span>
+                  <span className="text-sm text-ink-soft">{w.pinyin}</span>
+                  <span className="text-[13px] text-ink-faint ml-auto">{(w.english || '').slice(0, 18)}</span>
+                </button>
+              ))}
+            </div>
+          )}
         <button onClick={onDone} className="mt-5 w-full py-3 rounded-full bg-ink text-white font-medium hover:opacity-90 transition">回到聊天 →</button>
       </div>
+    </div>
+  );
+}
+
+// Listen-and-repeat. Play each sentence, then tap 🎤 to echo it; the utterance is
+// sent to the invisible pronunciation observer (no score is ever shown).
+function Shadowing({ shadow }) {
+  const [busyIdx, setBusyIdx] = useState(-1);
+  const [heard, setHeard] = useState({});
+  const canSpeak = spokenCaptureSupported();
+
+  async function echo(idx, item) {
+    if (busyIdx >= 0) return;
+    setBusyIdx(idx);
+    try {
+      const cap = await captureSpoken({ expectedSyllables: [...item.hanzi].length, timeoutMs: 6000 });
+      if (cap?.transcript) {
+        setHeard(h => ({ ...h, [idx]: true }));
+        api.pronObserve({ spoken: { transcript: cap.transcript, alternatives: cap.alternatives, heardTones: null, timing: cap.timing },
+          targetVocab: shadow.targetVocab || [] }).catch(() => {});
+      }
+    } catch {} finally { setBusyIdx(-1); }
+  }
+
+  return (
+    <div className="space-y-2">
+      {shadow.items.map((s, i) => (
+        <div key={i} className="flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-white border border-line">
+          <button onClick={() => (s.audio ? playAudio({ audio_path: s.audio, hanzi: s.hanzi }) : speak(s.hanzi))}
+            className="w-8 h-8 shrink-0 rounded-full bg-ink/5 grid place-items-center text-sm" title="Listen">🔊</button>
+          <div className="min-w-0 flex-1">
+            <div className="hanzi text-lg text-ink truncate">{s.hanzi}</div>
+            <div className="text-[12px] text-ink-faint truncate">{s.pinyin}</div>
+          </div>
+          {canSpeak && (
+            <button onClick={() => echo(i, s)} disabled={busyIdx >= 0}
+              className={`w-9 h-9 shrink-0 rounded-full grid place-items-center text-sm transition ${
+                heard[i] ? 'bg-jade-500 text-white' : busyIdx === i ? 'bg-rose-500 text-white animate-pulse' : 'bg-ink text-white hover:opacity-90'}`}
+              title="Repeat">{heard[i] ? '✓' : '🎤'}</button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

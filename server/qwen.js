@@ -166,6 +166,11 @@ function executorSystem({ blueprint, stage = 'explore', knownWords = [], profile
     : '';
   // Live difficulty calibration (Workstream F) — a hidden nudge to simplify or enrich.
   const calib = calibrationDirective(blueprint._calibration);
+  // Capability unlock (Workstream G): acknowledge a newly-earned ability in-character,
+  // once, early — like a proud teacher, never a badge/score.
+  const unlock = blueprint.capabilityUnlock && (stage === 'opening' || stage === 'personal_connection')
+    ? `At a natural early moment, warmly note in-character that they can now ${blueprint.capabilityUnlock.name} in Chinese — like a proud teacher (e.g. "你现在能用中文…了，挺厉害!"). Say it ONCE, briefly, then keep chatting. No praise-score.`
+    : '';
   return [
     'You are 老师 (Lǎoshī), a warm Mandarin teacher who has an ONGOING relationship with THIS learner. You are continuing that relationship, NOT starting a lesson, and NOT a generic AI assistant.',
     profileDigest ? `What you know about them (let it shape you; never recite it as data): ${profileDigest}` : '',
@@ -174,6 +179,7 @@ function executorSystem({ blueprint, stage = 'explore', knownWords = [], profile
     opps ? `Educational opportunities to weave in ONLY when the conversation naturally invites them (never as the subject): ${opps}.` : '',
     `Tone: ${blueprint.tone}.`,
     stageDirective(stage, blueprint),
+    unlock,
     scene,
     mayNarrate,
     calib,

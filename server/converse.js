@@ -10,11 +10,11 @@ import { laoshiConverse, conversationStage } from './qwen.js';
 import { knownWordIds, refreshStage } from './planner.js';
 import { scriptDirective, scriptLevel } from './learner.js';
 import { detectUsed } from './conversation.js';
-import { capabilityMastery } from './capabilities.js';
+import { capabilityMastery, pendingUnlock, markUnlockAcked } from './capabilities.js';
 import { buildExercise, cleanGloss } from './exercises.js';
 import { createCardsForWord } from './cards.js';
 import { weakTone, buildToneDrill } from './tone.js';
-import { liveCompletion } from './momentum.js';
+import { liveCompletion, computeCalibration } from './momentum.js';
 
 function genId() {
   return 'c_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -33,6 +33,10 @@ export async function startConversation() {
   plan.scriptDirective = scriptDirective(plan.scriptLevel);
   const capMastery = plan.capability ? capabilityMastery(plan.capability.id).score : 0;
   const blueprint = await buildBlueprint(plan, { capabilityMastery: capMastery, profileDigest: profileForPrompt() });
+  // Capability unlock (Workstream G): if the learner recently crossed a mastery
+  // threshold, let Laoshi acknowledge it in-character once, early in this talk.
+  const unlock = pendingUnlock();
+  if (unlock) { blueprint.capabilityUnlock = { name: unlock.name }; markUnlockAcked(unlock.id); }
   const id = genId();
   db().prepare(`INSERT INTO conversation_sessions(id,capability_id,plan_json,blueprint_json,stage,exchanges,created,updated)
     VALUES(?,?,?,?,?,0,datetime('now'),datetime('now'))`)
@@ -70,7 +74,17 @@ export async function conversationTurn({ id, userText = '', history = [], forceW
   if (userText && !history.some(m => m.role === 'user' && (m.content === userText || m.hanzi === userText))) soFar.push({ role: 'user', content: userText });
   const completion = liveCompletion(soFar, blueprint, plan, exchanges);   // authoritative exchange count
   const shouldWrap = forceWrap || extWrap || completion.shouldWrap;
-  const stage = conversationStage({ exchanges, budget: blueprint.budget, shouldWrap });
+
+  // Live difficulty calibration (Workstream F): a hidden per-turn signal that both
+  // steers the executor's wording AND gates the explore→introduce transition — hold
+  // back new material while the learner is struggling; move sooner when they breeze.
+  const calibration = computeCalibration(soFar);
+  blueprint._calibration = calibration;
+  let stage = conversationStage({ exchanges, budget: blueprint.budget, shouldWrap });
+  if (!shouldWrap) {
+    if (stage === 'introduce' && calibration <= -0.4) stage = 'explore';
+    else if (stage === 'explore' && calibration >= 0.5 && exchanges >= 2) stage = 'introduce';
+  }
 
   const reply = await laoshiConverse({
     blueprint, stage, history, userText,
@@ -120,10 +134,22 @@ function pseudo(seed) { const v = Math.sin((seed + 1) * 999) * 10000; return v -
 // available offline). Entered with a diegetic line, returned with a bridge sentence.
 // TODO(capability:) a reading-passage excursion for narrative capabilities.
 function buildExcursion(plan, blueprint) {
-  // Prefer an excursion the Director explicitly planned; otherwise offer a short
-  // tone-drill run — targeted at the weakest tone when known, else a general set of
-  // minimal pairs (always useful for a beginner ear).
   const planned = (blueprint.excursions || [])[0];
+
+  // Prefer a SHADOWING run (Workstream H) when we have short sentences built from the
+  // learner's words: listen-and-repeat trains pronunciation invisibly and keeps the
+  // conversational feel. Fall back to a tone-drill when no good sentence exists.
+  const shadow = buildShadowing(plan);
+  if (shadow.length >= 2 && planned?.kind !== 'reading') {
+    return {
+      kind: 'shadowing',
+      enterLine: (planned?.kind === 'shadowing' && planned.enterLine) || { hanzi: '来，跟我念一遍。', pinyin: 'Lái, gēn wǒ niàn yí biàn.', english: 'Here, say these after me.' },
+      exitBridge: (planned?.kind === 'shadowing' && planned.exitBridge) || { hanzi: '念得挺好！我们接着聊。', pinyin: 'Niàn de tǐng hǎo! Wǒmen jiēzhe liáo.', english: 'Nicely said! Let\'s keep chatting.' },
+      shadow: { items: shadow, targetVocab: (plan.targetVocab || []).map(v => ({ wordId: v.wordId, hanzi: v.hanzi, pinyin: v.pinyin })) },
+    };
+  }
+
+  // Tone-drill fallback — targeted at the weakest tone when known.
   const weak = weakTone();
   if (planned?.kind !== 'reading') {
     const drill = buildToneDrill(weak?.pair, 6);
@@ -136,6 +162,28 @@ function buildExcursion(plan, blueprint) {
     };
   }
   return null;
+}
+
+// A few short sentences to shadow, drawn from example sentences that contain a
+// focal/target word and stay short + comprehensible. The learner echoes them aloud;
+// pronunciation is observed invisibly (client → /api/pron/observe).
+function buildShadowing(plan) {
+  const targets = (plan.targetVocab || []).filter(v => v.wordId);
+  if (!targets.length) return [];
+  const out = [];
+  const seen = new Set();
+  for (const v of targets) {
+    const rows = db().prepare(`SELECT hanzi, pinyin, english FROM sentences
+      WHERE word_ids LIKE ? AND length(hanzi) BETWEEN 3 AND 14 ORDER BY length(hanzi) ASC LIMIT 2`)
+      .all(`%${v.wordId}%`);
+    for (const r of rows) {
+      if (seen.has(r.hanzi)) continue;
+      seen.add(r.hanzi);
+      out.push({ hanzi: r.hanzi, pinyin: r.pinyin || '', english: r.english || '' });
+      if (out.length >= 3) return out;
+    }
+  }
+  return out;
 }
 
 // Post-hoc inference lives in conversation.js (extended in Workstream F). This thin

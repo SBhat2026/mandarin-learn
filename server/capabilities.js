@@ -324,5 +324,34 @@ export function recordCapabilityDemonstration(capabilityId, quality = 0.9) {
     ON CONFLICT(capability_id) DO UPDATE SET score=excluded.score,
       demonstrations=capability_mastery.demonstrations+1, last_demo_at=excluded.last_demo_at`)
     .run(capabilityId, score, (cur.demonstrations || 0) + 1);
+  checkCapabilityUnlock(capabilityId);
   return score;
+}
+
+// ---- capability unlock moments (Workstream G) ------------------------------
+// When a capability is demonstrated enough (mastery crosses threshold across
+// sessions), record a hidden unlock so Laoshi can mark it in-character ONCE. Never
+// a badge/score. Rare and earned.
+const UNLOCK_SCORE = 0.7, UNLOCK_DEMOS = 3;
+export function checkCapabilityUnlock(capabilityId) {
+  const m = capabilityMastery(capabilityId);
+  if (m.score < UNLOCK_SCORE || (m.demonstrations || 0) < UNLOCK_DEMOS) return false;
+  const exists = db().prepare('SELECT 1 FROM capability_unlocks WHERE capability_id=?').get(capabilityId);
+  if (exists) return false;
+  db().prepare(`INSERT INTO capability_unlocks(capability_id, unlocked_at, acknowledged)
+    VALUES(?, datetime('now'), 0)`).run(capabilityId);
+  return true;
+}
+
+// The next unlock Laoshi hasn't acknowledged yet (feeds the opening as a light
+// in-character callback). Returns {id, name} or null.
+export function pendingUnlock() {
+  const row = db().prepare(`SELECT capability_id FROM capability_unlocks
+    WHERE acknowledged=0 ORDER BY unlocked_at ASC LIMIT 1`).get();
+  if (!row) return null;
+  const cap = getCapability(row.capability_id);
+  return cap ? { id: cap.id, name: cap.name } : null;
+}
+export function markUnlockAcked(capabilityId) {
+  db().prepare('UPDATE capability_unlocks SET acknowledged=1 WHERE capability_id=?').run(capabilityId);
 }

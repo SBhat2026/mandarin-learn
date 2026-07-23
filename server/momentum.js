@@ -80,6 +80,36 @@ function maxQuestionRung(learner) {
   return rung;
 }
 
+// Live difficulty calibration (Workstream F). A running signal in [-1,1] read from
+// the recent learner turns: negative = struggling (short/empty replies, falling back
+// to English), positive = breezing (elaborating, asking, longer apt replies). Fed to
+// the executor each turn (simplify vs enrich) and used to gate explore→introduce.
+const LATIN = /[a-zA-Z]/;
+function englishFallback(t) {
+  const s = textOf(t);
+  const latin = (s.match(/[a-zA-Z]/g) || []).length;
+  const cjkN = (s.match(CJK) || []).length;
+  return latin >= 3 && latin > cjkN;   // mostly English → reaching for help
+}
+export function computeCalibration(transcript = []) {
+  const learner = transcript.filter(t => t.role === 'user');
+  if (!learner.length) return 0;
+  const recent = learner.slice(-2);
+  let struggle = 0, ease = 0;
+  for (const t of recent) {
+    const l = len(t);
+    if (englishFallback(t)) struggle += 1;
+    else if (l <= 1) struggle += 0.8;
+    else if (l < 3) struggle += 0.4;
+    if (isQuestion(t)) ease += 0.5;
+    if (l >= 8) ease += 0.8; else if (l >= 5) ease += 0.4;
+    if (/因为|所以|觉得|但是|不过/.test(textOf(t))) ease += 0.5;   // elaboration markers
+  }
+  const n = recent.length || 1;
+  return clamp((ease - struggle) / (1.5 * n), -1, 1);
+}
+const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+
 // Live completion decision. Prefer to satisfy education before wrapping, but never
 // run past the momentum/budget ceiling. `exchangeCount`, when given, is the
 // authoritative turn count (from the session) so the ceiling doesn't depend on how
