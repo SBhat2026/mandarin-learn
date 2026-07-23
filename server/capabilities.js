@@ -10,6 +10,11 @@ import { State } from './fsrs.js';
 import { introducedWordIds, knownWordIds, newCandidates } from './planner.js';
 import { cleanGloss } from './exercises.js';
 import { interestWeights } from './interests.js';
+import { levelCefr } from './level.js';
+
+// Map a capability's rough CEFR band string to a 0..4 scale (A0..B2).
+const CEFR_SCALE = { A0: 0, A1: 1, A2: 2, B1: 3, B2: 4 };
+function capCefr(cap) { return CEFR_SCALE[cap?.cefr_ish] ?? null; }
 
 const CJK = /[一-鿿]/;
 const MASTERY_READY = 0.5;   // a capability counts as "held" for prereqs at this score
@@ -266,6 +271,11 @@ export function pickCapability({ introduced, known, dueSet } = {}) {
   const caps = allCapabilities();
   if (!caps.length) return null;
 
+  // Inferred learner CEFR (Workstream E). When confident, gently prefer capabilities
+  // at or just above the learner's level and discourage ones far above/below — so
+  // capability difficulty tracks measured level. Null/low-confidence → no effect.
+  const learnerLevel = levelCefr();
+
   let best = null, bestScore = -Infinity;
   for (const cap of caps) {
     const m = capabilityMastery(cap.id);
@@ -280,8 +290,18 @@ export function pickCapability({ introduced, known, dueSet } = {}) {
     // capabilities first when all else is equal).
     const masteryPenalty = 2.2 * m.score;
     const orderNudge = -0.02 * (cap.ordering || 0);
+    // Level fit: sweet spot is the learner's level or one band above (i+1 stretch).
+    let levelFit = 0;
+    if (learnerLevel.cefr != null) {
+      const cc = capCefr(cap);
+      if (cc != null) {
+        const delta = cc - learnerLevel.cefr;            // <0 too easy, >1 too hard
+        const raw = delta >= 0 && delta <= 1 ? 1 : delta < 0 ? -0.4 * Math.abs(delta) : -0.6 * (delta - 1);
+        levelFit = 0.9 * learnerLevel.confidence * raw;
+      }
+    }
     const score = 1.6 * readiness + 0.9 * gain + 1.2 * interest + 0.8 * due
-      - masteryPenalty + readyGate + orderNudge;
+      - masteryPenalty + readyGate + orderNudge + levelFit;
     if (score > bestScore) { bestScore = score; best = { cap, readiness, gain, interest, due, mastery: m.score, score }; }
   }
   if (!best) return null;

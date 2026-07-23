@@ -10,6 +10,7 @@ import { weakestDimension, getStage, computeStage, setStage, modalityBias, unloc
 import { buildExercise } from './exercises.js';
 import { weakTone } from './tone.js';
 import { interestWeights } from './interests.js';
+import { newWordBand, bandFit } from './level.js';
 
 const CJK = /[一-鿿]/;
 const chars = (s) => [...(s || '')].filter(ch => CJK.test(ch));
@@ -80,6 +81,10 @@ export function newCandidates(limit, introduced) {
   // Inferred interests gently pull relevant vocabulary forward — never so hard
   // that it overrides comprehensibility/frequency, just enough that lessons feel
   // personally relevant. Invisible to the learner.
+  // Inferred difficulty band (Workstream E). Null until there's enough signal, in
+  // which case new words near the band center (just beyond comprehension) get a gentle
+  // lift so lesson difficulty tracks the learner's real level — hidden, and smooth.
+  const band = newWordBand();
   const interests = interestWeights();
   const interestBoost = (topicsJson) => {
     if (!interests.size) return 0;
@@ -106,8 +111,9 @@ export function newCandidates(limit, introduced) {
     // cards — push them well below concrete vocabulary so they surface only once
     // the learner has words to embed them in.
     const particlePenalty = w.particle ? 6 : 0;
+    const bandBoost = 1.5 * bandFit(rank, band);
     const score = 3 * (w.concrete ?? 1) + freqBoost + 1.5 * fracKnown
-      + Math.min(2, familyBonus) + interestBoost(w.topics) - levelPenalty - loadPenalty - particlePenalty;
+      + Math.min(2, familyBonus) + interestBoost(w.topics) + bandBoost - levelPenalty - loadPenalty - particlePenalty;
     return { id: w.id, hanzi: w.hanzi, score };
   }).sort((a, b) => b.score - a.score);
 

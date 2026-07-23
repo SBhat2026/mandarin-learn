@@ -12,6 +12,7 @@ import { analyzeSpoken, persistPronunciation, accuracyToRating } from './pronunc
 import { recordCapabilityDemonstration } from './capabilities.js';
 import { harvestFromTranscript } from './profile.js';
 import { computeMetrics } from './momentum.js';
+import { refreshLevels } from './level.js';
 
 const norm = (s = '') => String(s).replace(/[\s\p{P}\p{S}]/gu, '');
 const tonelessPinyin = (s = '') => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]/g, '');
@@ -117,6 +118,10 @@ export async function scheduleFromConversation({ plan, transcript, sessionId = n
   // (b) Harvest durable personal facts + open threads for future personalization.
   let profileHarvest = null;
   try { profileHarvest = await harvestFromTranscript(transcript); } catch {}
+
+  // (b2) Automatic level detection (Workstream E): observe what the learner produced
+  // and recompute the productive/receptive bands that steer new-word difficulty.
+  try { refreshLevels(transcript); } catch {}
 
   // (c) Persist the hidden conversation metrics.
   metrics.capability_demos = capabilityDemo ? 1 : 0;
