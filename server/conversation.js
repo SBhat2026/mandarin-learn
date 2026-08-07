@@ -13,29 +13,49 @@ import { recordCapabilityDemonstration } from './capabilities.js';
 import { harvestFromTranscript } from './profile.js';
 import { computeMetrics } from './momentum.js';
 import { refreshLevels } from './level.js';
+import { segment } from './vocabguard.js';
 
 const norm = (s = '') => String(s).replace(/[\s\p{P}\p{S}]/gu, '');
 const tonelessPinyin = (s = '') => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]/g, '');
 
 // Did `text` (hanzi and/or pinyin) contain this vocab word?
+// Hanzi: WORD-BOUNDARY via greedy dictionary segmentation — 好 inside 你好 no longer
+// credits 好. Pinyin: only multi-syllable (5+ letter) targets match by substring;
+// short syllables like "shi" matched half the language and are no longer credited.
 function mentions(text, pinyin, word) {
-  if (word.hanzi && norm(text).includes(norm(word.hanzi))) return { hit: true, viaHanzi: true };
-  if (word.pinyin && pinyin && tonelessPinyin(pinyin).includes(tonelessPinyin(word.pinyin))) return { hit: true, viaHanzi: false };
+  if (word.hanzi) {
+    const target = norm(word.hanzi);
+    if (target && segment(text || '').includes(target)) return { hit: true, viaHanzi: true };
+    // Long targets (3+ chars) can span segments when the DB lacks the compound —
+    // substring is unambiguous at that length.
+    if (target.length >= 3 && norm(text).includes(target)) return { hit: true, viaHanzi: true };
+  }
+  if (word.pinyin && pinyin) {
+    const tp = tonelessPinyin(word.pinyin);
+    if (tp.length >= 5 && tonelessPinyin(pinyin).includes(tp)) return { hit: true, viaHanzi: false };
+  }
   return { hit: false };
 }
 
-// Heuristic per-word signals from the transcript.
+// Heuristic per-word signals from the transcript. Tapping a scaffolded choice chip
+// is ASSISTED production — real recognition, not real production — and earns less
+// credit than a typed/spoken turn.
 function heuristicSignals(transcript, targetVocab) {
   const learner = transcript.filter(t => t.role === 'user');
   const teacher = transcript.filter(t => t.role === 'assistant');
   const learnerEngaged = learner.length > 0;
   const sig = {};
   for (const v of targetVocab) {
-    let produced = false, producedHanzi = false, exposed = false;
-    for (const t of learner) { const m = mentions(t.hanzi || t.content || '', t.pinyin, v); if (m.hit) { produced = true; producedHanzi = producedHanzi || m.viaHanzi; } }
+    let produced = false, producedHanzi = false, assisted = false, exposed = false;
+    for (const t of learner) {
+      const m = mentions(t.hanzi || t.content || '', t.pinyin, v);
+      if (!m.hit) continue;
+      if (t.tapped) { assisted = true; continue; }
+      produced = true; producedHanzi = producedHanzi || m.viaHanzi;
+    }
     for (const t of teacher) { if (mentions(t.hanzi || '', t.pinyin, v).hit) exposed = true; }
-    const understood = produced ? 0.9 : (exposed && learnerEngaged ? 0.6 : exposed ? 0.4 : 0.45);
-    sig[v.wordId] = { produced, producedHanzi, exposed, understood };
+    const understood = produced ? 0.9 : assisted ? 0.7 : (exposed && learnerEngaged ? 0.6 : exposed ? 0.4 : 0.45);
+    sig[v.wordId] = { produced, producedHanzi, assisted, exposed, understood };
   }
   return sig;
 }
@@ -80,8 +100,10 @@ export async function scheduleFromConversation({ plan, transcript, sessionId = n
     const score = llm && llm[v.hanzi] != null ? (s.understood + llm[v.hanzi]) / 2 : s.understood;
 
     // Rating from inferred understanding. Due words that never surfaced stay due.
+    // Assisted (chip-tap) production is recognition-level credit, never 'spoken'.
     let rating, dim;
-    if (s.produced) { rating = score >= 0.85 ? 3 : 3; dim = 'spoken'; }
+    if (s.produced) { rating = 3; dim = 'spoken'; }
+    else if (s.assisted) { rating = 2; dim = 'meaning'; }
     else if (score >= 0.6) { rating = 2; dim = 'meaning'; }
     else if (v.role !== 'reinforce') { rating = 2; dim = 'meaning'; }  // seed a newly taught concept
     else continue;                                                     // review didn't come up → leave due

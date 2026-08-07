@@ -67,6 +67,14 @@ export const api = STATIC ? {
   image: async () => ({ kind: 'none' }),
   signalChannel: async () => ({ ok: true }),
   signalChoice: async () => ({ ok: true }),
+  familyNext: async () => ({ lesson: null }),
+  familyOutcome: async () => ({ ok: true, demo: true }),
+  story: async () => ({ story: null, demo: true }),
+  storyOutcome: async () => ({ ok: true, demo: true }),
+  prefs: async () => ({ pace: 5, topics: [] }),
+  setPrefs: async (p) => ({ ...p, demo: true }),
+  pinyinConvert: async () => ({ ok: false }),
+  spend: async () => null,
 } : {
   meta: () => req('/api/meta'),
   home: () => req('/api/home'),
@@ -97,6 +105,14 @@ export const api = STATIC ? {
   image: (hanzi) => req('/api/image?hanzi=' + encodeURIComponent(hanzi)),
   signalChannel: (kind) => req('/api/signal/channel', { method: 'POST', body: JSON.stringify({ kind }) }),
   signalChoice: (correct) => req('/api/signal/choice', { method: 'POST', body: JSON.stringify({ correct }) }),
+  familyNext: () => req('/api/family/next'),
+  familyOutcome: (key, correct) => req('/api/family/outcome', { method: 'POST', body: JSON.stringify({ key, correct }) }),
+  story: (fresh = false) => req('/api/reading/story' + (fresh ? '?fresh=1' : '')),
+  storyOutcome: (body) => req('/api/reading/story/outcome', { method: 'POST', body: JSON.stringify(body) }),
+  prefs: () => req('/api/prefs'),
+  setPrefs: (body) => req('/api/prefs', { method: 'POST', body: JSON.stringify(body) }),
+  pinyinConvert: (q) => req('/api/pinyin/convert?q=' + encodeURIComponent(q)),
+  spend: () => req('/api/spend'),
 };
 
 // Audio: real media is only present with the backend. In the demo, playAudio falls

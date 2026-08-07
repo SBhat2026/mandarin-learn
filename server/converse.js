@@ -5,7 +5,7 @@
 //              turns with meet-the-words beats and scaffolded choices (vocabguard).
 //   rung 2   — free: the existing Director/blueprint/Qwen-executor conversation.
 // The guided rungs never strand the learner (intent.js) and always find a way forward.
-import { db, getModel, setModel } from './db.js';
+import { db, getModel, setModel, getSetting } from './db.js';
 import { buildLessonPlan } from './neighborhood.js';
 import { buildBlueprint, buildBlueprintLocal } from './director.js';
 import { profileForPrompt } from './profile.js';
@@ -22,6 +22,7 @@ import { currentRung, rungKnobs } from './rung.js';
 import { allowedSet, buildFrameTurn, groundTokens, beginnerNewWords, vocabToken, validateTurn, segment } from './vocabguard.js';
 import { classifyIntent, regroundReply, expressionGapReply } from './intent.js';
 import { graphNeighbors, graphSteer, nextConcepts } from './graphwalk.js';
+import { conversationProfile } from './level.js';
 
 function genId() {
   return 'c_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -158,6 +159,15 @@ export async function startConversation() {
   const unlock = pendingUnlock();
   if (unlock) { blueprint.capabilityUnlock = { name: unlock.name }; markUnlockAcked(unlock.id); }
 
+  // Conversations grow with progression: the measured level scales the exchange
+  // budget and new-concept allowance past the Director's conservative defaults.
+  const prof = conversationProfile();
+  blueprint.budget.exchanges = [
+    Math.max(blueprint.budget.exchanges?.[0] || 4, prof.exchanges[0]),
+    Math.max(blueprint.budget.exchanges?.[1] || 8, prof.exchanges[1]),
+  ];
+  blueprint.budget.newConcepts = Math.max(blueprint.budget.newConcepts || 1, prof.newConcepts);
+
   const id = genId();
 
   if (rung < 2) {
@@ -177,7 +187,8 @@ export async function startConversation() {
     VALUES(?,?,?,?,?,0,datetime('now'),datetime('now'))`)
     .run(id, plan.capability?.id ?? null, JSON.stringify(plan), JSON.stringify(blueprint), rung < 2 ? 'guided' : 'opening');
 
-  return { sessionId: id, scriptLevel: plan.scriptLevel, rung, guided: rung < 2, hasThread: hasOpenThread(), blueprintEngine: blueprint._engine };
+  return { sessionId: id, scriptLevel: plan.scriptLevel, scriptPref: getSetting('script_pref', 'hanzi'),
+    rung, guided: rung < 2, hasThread: hasOpenThread(), blueprintEngine: blueprint._engine };
 }
 
 export function getSession(id) {
@@ -320,20 +331,35 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap }) {
   const steer = graphSteer(inPlay, { known: knownWordIds(), introduced: introducedWordIds() });
   const memory = conversationMemory(soFar);
 
-  const reply = await laoshiConverse({
+  const prof = conversationProfile();
+  const converseArgs = {
     blueprint, stage, history, userText, graphSteer: steer, conversationMemory: memory,
     knownWords: knownStrings(), profileDigest: profileForPrompt(), scriptDirective: plan.scriptDirective,
-  });
+    profile: prof,
+  };
+  let reply = await laoshiConverse(converseArgs);
+
+  // Comprehensible-input ENFORCEMENT (not just logging): a turn built on words the
+  // learner can't decode gets ONE regeneration naming the violations. If the second
+  // attempt still violates, keep whichever attempt violates less — the interlinear
+  // grounding glosses the leak so the learner is never stranded.
+  const allowed = allowedSet({ rung: 2, sessionWords: plan.targetVocab || [] });
+  if (reply.hanzi) {
+    const v1 = validateTurn(reply.hanzi, allowed);
+    if (!v1.ok) {
+      const repaired = await laoshiConverse({ ...converseArgs,
+        extraDirective: `REPAIR: your previous draft used words the learner cannot decode yet: ${v1.violations.join(' ')}. Say the same thing again using ONLY the KNOWN words listed above (plus core function words). Simplify rather than substitute another rare word.` });
+      const v2 = repaired.hanzi ? validateTurn(repaired.hanzi, allowed) : { ok: false, violations: v1.violations.concat('∅') };
+      if (v2.ok || v2.violations.length < v1.violations.length) reply = repaired;
+      if (!v2.ok) console.log(`[vocabguard] rung2 out-of-set after repair: ${(v2.ok ? [] : v2.violations).join(' ')} in "${reply.hanzi}"`);
+    }
+  }
   const used = detectUsed(reply, plan.targetVocab || []);
 
   // Interlinear (reveal mode) still grounds the sentence word-by-word so a tap reveals
-  // aligned pinyin+gloss; validation is logged (hidden) to watch free-rung drift.
+  // aligned pinyin+gloss.
   const newSet = new Set((plan.targetVocab || []).map(v => v.hanzi));
   const tokens = reply.hanzi ? groundTokens(reply.hanzi, { newSet }) : [];
-  if (reply.hanzi) {
-    const { ok, violations } = validateTurn(reply.hanzi, allowedSet({ rung: 2, sessionWords: plan.targetVocab || [] }));
-    if (!ok) console.log(`[vocabguard] rung2 out-of-set: ${violations.join(' ')} in "${reply.hanzi}"`);
-  }
 
   db().prepare(`UPDATE conversation_sessions SET stage=?, exchanges=?, updated=datetime('now') WHERE id=?`).run(stage, exchanges, id);
 

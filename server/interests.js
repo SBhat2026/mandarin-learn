@@ -29,10 +29,12 @@ export function bumpInterests(wordIds = [], weight = 1) {
 
 // Sorted interest weights, with onboarding picks folded in as a prior so early
 // lessons already lean toward stated interests before behavior accumulates.
+// An explicit "today I want to talk about X" pick (prefs) outweighs everything.
 export function getInterests() {
   const model = getModel('interests', {}) || {};
   const merged = { ...model };
   for (const t of getSetting('interest_topics', []) || []) merged[t] = (merged[t] || 0) + 1.5;
+  for (const t of getSetting('chat_topics', []) || []) merged[t] = (merged[t] || 0) + 3;
   return Object.entries(merged)
     .map(([topic, weight]) => ({ topic, weight }))
     .sort((a, b) => b.weight - a.weight);

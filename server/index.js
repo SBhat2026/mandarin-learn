@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { db, initSchema, MEDIA_DIR, getSetting, runAsUser, currentUserSlug, ROOT } from './db.js';
+import { db, initSchema, MEDIA_DIR, getSetting, setSetting, runAsUser, currentUserSlug, ROOT } from './db.js';
 import { listUsers, addUser, getUser, primarySlug, setUserPref } from './users.js';
 import { aiRateLimit } from './ratelimit.js';
 import { buildSession, buildLesson, submitReview, currentUnit, unitProgress } from './session.js';
@@ -26,6 +26,12 @@ import { saveOnboarding, onboardingState } from './onboarding.js';
 import { claudeModelPref, setClaudeModelPref, richModelAvailable } from './anthropic.js';
 import { TOPICS } from './taxonomy.js';
 import { State } from './fsrs.js';
+import { nextFamily, recordFamilyOutcome } from './familylessons.js';
+import { getStory, storyOutcome } from './stories.js';
+import { convertPinyin } from './pinyinime.js';
+import { synthesize } from './tts.js';
+import { transcribe, sttAvailable } from './stt.js';
+import { spendSummary } from './spend.js';
 
 initSchema();
 const app = express();
@@ -229,6 +235,72 @@ app.post('/api/signal/choice', wrap((req, res) => {
 
 // ---- Reading passages ----
 app.get('/api/reading', wrap((req, res) => res.json({ passages: passages({}) })));
+
+// ── Learner controls (hybrid agency): pace, today's topics, stretch ─────────
+// Visible levers over an otherwise-invisible engine. Pace = daily new-word budget;
+// topics = what today's conversations should lean toward; stretch = "push me".
+app.get('/api/prefs', wrap((req, res) => {
+  const unlocked = db().prepare('SELECT COUNT(*) c FROM capability_unlocks').get().c;
+  const capsTotal = db().prepare('SELECT COUNT(*) c FROM capabilities').get().c;
+  const readWords = db().prepare("SELECT COUNT(*) c FROM word_mastery WHERE dimension='reading' AND score>0.6 AND exposures>=2").get().c;
+  res.json({
+    pace: getSetting('daily_new', 10),
+    topics: getSetting('chat_topics', []) || [],
+    stretch: Boolean(getSetting('stretch_mode', false)),
+    script: getSetting('script_pref', 'hanzi'),
+    style: getSetting('learning_style', 'visual'),
+    allTopics: TOPICS,
+    progress: { capabilitiesUnlocked: unlocked, capabilitiesTotal: capsTotal, readWords,
+      knownWords: knownWordIds().size },
+  });
+}));
+app.post('/api/prefs', wrap((req, res) => {
+  const { pace, topics, stretch, script, style } = req.body || {};
+  if (style != null) setSetting('learning_style', ['visual', 'auditory', 'balanced'].includes(style) ? style : 'visual');
+  if (pace != null) setSetting('daily_new', Math.max(3, Math.min(35, Number(pace) || 10)));
+  if (Array.isArray(topics)) setSetting('chat_topics', topics.filter(t => TOPICS.includes(t)).slice(0, 3));
+  if (stretch != null) setSetting('stretch_mode', Boolean(stretch));
+  if (script != null) setSetting('script_pref', script === 'hanzi' ? 'hanzi' : 'auto');
+  res.json({ pace: getSetting('daily_new', 10), topics: getSetting('chat_topics', []),
+    stretch: Boolean(getSetting('stretch_mode', false)), script: getSetting('script_pref', 'hanzi'),
+    style: getSetting('learning_style', 'visual') });
+}));
+
+// ── Metered spend (subtle footer readout) ───────────────────────────────────
+app.get('/api/spend', wrap(async (req, res) => res.json(await spendSummary())));
+
+// ── Local Whisper STT ───────────────────────────────────────────────────────
+app.get('/api/stt/health', (req, res) => res.json({ available: sttAvailable() }));
+app.post('/api/stt', express.raw({ type: () => true, limit: '15mb' }), wrap(async (req, res) => {
+  const hint = String(req.query.hint || '');
+  res.json(await transcribe(req.body, { hint }));
+}));
+
+// ── Neural TTS (Edge voices, cached mp3) ────────────────────────────────────
+app.get('/api/tts', wrap(async (req, res) => {
+  try {
+    const file = await synthesize(String(req.query.text || ''), { slow: req.query.slow === '1' });
+    res.json({ url: '/media/' + file });
+  } catch (e) {
+    res.status(503).json({ error: e.message });   // client falls back to speechSynthesis
+  }
+}));
+
+// ── Pinyin IME: typed toneless pinyin → hanzi (with autocorrect) ────────────
+app.get('/api/pinyin/convert', wrap((req, res) => res.json(convertPinyin(String(req.query.q || '')))));
+
+// ── Graded-reader stories ───────────────────────────────────────────────────
+app.get('/api/reading/story', aiRateLimit, wrap(async (req, res) =>
+  res.json({ story: await getStory({ fresh: req.query.fresh === '1' }) })));
+app.post('/api/reading/story/outcome', wrap((req, res) => res.json(storyOutcome(req.body || {}))));
+
+// ── Character-family curriculum ─────────────────────────────────────────────
+app.get('/api/family/next', wrap((req, res) => res.json({ lesson: nextFamily() })));
+app.post('/api/family/outcome', wrap((req, res) => {
+  const { key, correct } = req.body || {};
+  if (!key) return res.status(400).json({ error: 'key required' });
+  res.json(recordFamilyOutcome(String(key), Boolean(correct)));
+}));
 
 // ---- Tone trainer ----
 app.get('/api/tone', wrap((req, res) => {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api.js';
-import { recognitionSupported, listenOnce, ttsSupported, speak } from '../lib/speech.js';
+import { spokenCaptureSupported, captureSpoken, ttsSupported, speak } from '../lib/speech.js';
 
 export default function Onboarding({ onDone }) {
   const [meta, setMeta] = useState(null);
@@ -18,9 +18,15 @@ export default function Onboarding({ onDone }) {
   const toggle = (t) => setTopics(cur => cur.includes(t) ? cur.filter(x => x !== t) : cur.length < 3 ? [...cur, t] : cur);
 
   async function micCheck() {
-    if (!recognitionSupported()) { setMic('unsupported'); return; }
+    // Any capture path counts — local Whisper works where Web Speech doesn't.
+    if (!spokenCaptureSupported()) { setMic('unsupported'); return; }
     setMic('listening');
-    try { await listenOnce({ timeoutMs: 5000 }); setMic('ok'); } catch { setMic('failed'); }
+    // Heard-anything counts: a transcript OR mic voice activity (the acoustic
+    // path still yields tone data even when transcription comes back empty).
+    try {
+      const cap = await captureSpoken({ expectedSyllables: 2, timeoutMs: 5000, hint: '你好' });
+      setMic(cap.transcript || cap.heardVoice ? 'ok' : 'failed');
+    } catch { setMic('failed'); }
   }
 
   async function finish() {

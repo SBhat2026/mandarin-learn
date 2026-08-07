@@ -39,6 +39,8 @@ export default function Home() {
         </div>
       </section>
 
+      <TodayControls />
+
       {/* Path */}
       {units.length === 0 && <p className="text-ink-soft">No units yet — run the ingest pipeline.</p>}
       <div className="relative pl-1">
@@ -52,6 +54,83 @@ export default function Home() {
         </ol>
       </div>
     </div>
+  );
+}
+
+// Visible learner controls over the (otherwise invisible) engine: pace dial,
+// today's conversation topics, a "stretch me" toggle, and can-do progress.
+function TodayControls() {
+  const [prefs, setPrefs] = useState(null);
+  const [open, setOpen] = useState(false);
+  const saveTimer = useRef(null);
+  const pending = useRef({});
+
+  useEffect(() => { api.prefs().then(setPrefs).catch(() => setPrefs(null)); }, []);
+  if (!prefs) return null;
+
+  function push(next) {
+    setPrefs(p => ({ ...p, ...next }));
+    pending.current = { ...pending.current, ...next };   // accumulate — rapid edits all save
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      const body = pending.current; pending.current = {};
+      api.setPrefs(body).catch(() => {});
+    }, 400);
+  }
+  function toggleTopic(t) {
+    const cur = prefs.topics || [];
+    const next = cur.includes(t) ? cur.filter(x => x !== t) : [...cur, t].slice(-3);
+    push({ topics: next });
+  }
+
+  const prog = prefs.progress || {};
+  return (
+    <section className="mb-8 card-face p-5">
+      <button onClick={() => setOpen(o => !o)} className="w-full flex items-center justify-between">
+        <span className="text-[13px] font-medium text-ink">Your pace & topics</span>
+        <span className="text-[12px] text-ink-faint">
+          {prefs.pace} new words/day{prefs.stretch ? ' · stretching' : ''}{(prefs.topics || []).length ? ` · ${prefs.topics.join(', ')}` : ''} {open ? '▴' : '▾'}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-4 space-y-4 animate-fade">
+          <div>
+            <div className="flex justify-between text-[12px] text-ink-faint mb-1">
+              <span>New words per day</span><span className="text-ink font-medium">{prefs.pace}</span>
+            </div>
+            <input type="range" min="3" max="35" value={prefs.pace}
+              onChange={(e) => push({ pace: Number(e.target.value) })} className="w-full accent-black" />
+          </div>
+          <div>
+            <div className="text-[12px] text-ink-faint mb-1.5">What do you want to talk about today? <span className="text-ink-faint/60">(up to 3)</span></div>
+            <div className="flex flex-wrap gap-1.5">
+              {(prefs.allTopics || []).map(t => (
+                <button key={t} onClick={() => toggleTopic(t)}
+                  className={`px-2.5 py-1 rounded-full text-[12px] border capitalize transition ${
+                    (prefs.topics || []).includes(t) ? 'bg-ink text-white border-ink' : 'bg-white text-ink-soft border-line hover:border-ink/30'}`}>{t}</button>
+              ))}
+            </div>
+          </div>
+          <label className="flex items-center gap-2 text-[13px] text-ink-soft cursor-pointer">
+            <input type="checkbox" checked={prefs.stretch} onChange={(e) => push({ stretch: e.target.checked })} className="accent-black" />
+            Stretch me — longer, harder conversations
+          </label>
+          <label className="flex items-center gap-2 text-[13px] text-ink-soft cursor-pointer">
+            <input type="checkbox" checked={prefs.script === 'hanzi'} onChange={(e) => push({ script: e.target.checked ? 'hanzi' : 'auto' })} className="accent-black" />
+            Characters first — hanzi as the headline, pinyin underneath
+          </label>
+          <label className="flex items-center gap-2 text-[13px] text-ink-soft cursor-pointer">
+            <input type="checkbox" checked={prefs.style === 'visual'} onChange={(e) => push({ style: e.target.checked ? 'visual' : 'balanced' })} className="accent-black" />
+            I learn by reading — fewer listening drills, text never hidden
+          </label>
+          <div className="pt-3 border-t border-line flex gap-5 text-[12px] text-ink-faint">
+            <span><b className="text-ink">{prog.knownWords ?? 0}</b> words solid</span>
+            <span><b className="text-ink">{prog.readWords ?? 0}</b> read well</span>
+            <span><b className="text-ink">{prog.capabilitiesUnlocked ?? 0}</b>/{prog.capabilitiesTotal ?? 0} things you can do</span>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 

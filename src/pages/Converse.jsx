@@ -20,12 +20,14 @@ export default function Converse({ onFallback }) {
   const [excursion, setExcursion] = useState(null);
   const [popover, setPopover] = useState(null);
   const [revealed, setRevealed] = useState({});
+  const [ime, setIme] = useState(null);          // live pinyin→hanzi conversion preview
+  const imeTimer = useRef(null);
   const inputRef = useRef(null);
   const scroller = useRef(null);
   const opened = useRef(false);
   const pendingSpoken = useRef(null);
   const sessionId = session?.sessionId;
-  const scriptMode = scriptModeFromLevel(session?.scriptLevel);
+  const scriptMode = scriptModeFromLevel(session?.scriptLevel, session?.scriptPref);
   const canSpeak = spokenCaptureSupported();
 
   useEffect(() => {
@@ -48,14 +50,14 @@ export default function Converse({ onFallback }) {
     api.signalChannel('reveal_text').catch(() => {});
   }
 
-  async function turn(text, opening = false, spoken = null, sid = sessionId) {
+  async function turn(text, opening = false, spoken = null, sid = sessionId, tapped = false) {
     if (busy || !sid) return;
     const history = historyFor();
     if (!opening) {
       const last = items[items.length - 1];
       const lastIdx = items.length - 1;
       if (last?.role === 'assistant' && last.audioFirst && !revealed[lastIdx]) api.signalChannel('kept_audio').catch(() => {});
-      setItems(prev => [...prev, { role: 'user', hanzi: text }]);
+      setItems(prev => [...prev, { role: 'user', hanzi: text, tapped }]);
       if (spoken) api.pronObserve({ spoken: { ...spoken, transcript: text }, targetVocab: [] }).catch(() => {});
     }
     setInput(''); pendingSpoken.current = null; setBusy(true);
@@ -86,7 +88,9 @@ export default function Converse({ onFallback }) {
   function chooseChip(choice) {
     if (busy || done) return;
     api.signalChoice(true).catch(() => {});
-    turn(choice.hanzi, false, null);
+    // tapped=true: assisted production earns recognition-level credit post-hoc,
+    // never full 'spoken' credit (conversation.js heuristicSignals).
+    turn(choice.hanzi, false, null, sessionId, true);
   }
 
   function returnFromExcursion(ex) {
@@ -105,15 +109,41 @@ export default function Converse({ onFallback }) {
     if (!canSpeak || listening || busy) return;
     setListening(true); setLevel(0);
     try {
-      const cap = await captureSpoken({ expectedSyllables: 3, timeoutMs: 6000, onLevel: setLevel });
+      const lastTeacher = [...items].reverse().find(i => i.role === 'assistant')?.hanzi || '';
+      const cap = await captureSpoken({ expectedSyllables: 3, timeoutMs: 6000, onLevel: setLevel, hint: lastTeacher });
       const spoken = { transcript: cap.transcript, alternatives: cap.alternatives, heardTones: null, timing: cap.timing };
       if (cap.transcript) { setInput(cap.transcript); pendingSpoken.current = spoken; }
     } catch {} finally { setListening(false); }
   }
 
+  // Live pinyin IME: typing latin that looks like pinyin shows a hanzi preview;
+  // tap it (or just send) to speak in characters. English ("how do I say…")
+  // passes through untouched.
+  function onInputChange(value) {
+    setInput(value); pendingSpoken.current = null;
+    clearTimeout(imeTimer.current);
+    const latin = /^[a-zA-Z' ]{2,}$/.test(value.trim());
+    if (!latin) { setIme(null); return; }
+    imeTimer.current = setTimeout(async () => {
+      try {
+        const r = await api.pinyinConvert(value.trim());
+        setIme(r.ok ? r : null);
+      } catch { setIme(null); }
+    }, 250);
+  }
+
+  function acceptIme() {
+    if (!ime?.hanzi) return;
+    setInput(ime.hanzi); setIme(null);
+    inputRef.current?.focus();
+  }
+
   function submitTyped() {
-    const text = input.trim();
+    let text = input.trim();
     if (!text) return;
+    // Typed pinyin auto-converts on send — the preview showed what it becomes.
+    if (ime?.ok && ime.hanzi && /^[a-zA-Z' ]+$/.test(text)) text = ime.hanzi;
+    setIme(null);
     const spoken = pendingSpoken.current && pendingSpoken.current.transcript === text ? pendingSpoken.current : null;
     turn(text, false, spoken);
   }
@@ -167,6 +197,14 @@ export default function Converse({ onFallback }) {
             className="mb-2 text-[12px] text-ink-soft hover:text-ink border border-line rounded-full px-3 py-1 bg-white/70">
             💬 Help me say something…
           </button>
+          {ime?.ok && ime.hanzi && (
+            <button type="button" onClick={acceptIme}
+              className="mb-2 ml-2 flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-jade-50 border border-jade-200 hover:border-jade-400 transition">
+              <span className="hanzi text-lg text-ink">{ime.hanzi}</span>
+              <span className="text-[12px] text-jade-700"><TonedPinyin pinyin={ime.pinyin} /></span>
+              <span className="text-[11px] text-ink-faint">tap or send ↵</span>
+            </button>
+          )}
           <div className="flex items-center gap-2">
             {canSpeak && (
               <button type="button" onClick={mic} disabled={busy}
@@ -176,8 +214,8 @@ export default function Converse({ onFallback }) {
                 title="Speak">🎤</button>
             )}
             <form onSubmit={(e) => { e.preventDefault(); submitTyped(); }} className="flex-1 flex items-center gap-2">
-              <input ref={inputRef} value={input} onChange={(e) => { setInput(e.target.value); pendingSpoken.current = null; }}
-                placeholder={canSpeak ? 'Tap 🎤 to speak, or type…' : 'Reply in Chinese or English…'}
+              <input ref={inputRef} value={input} onChange={(e) => onInputChange(e.target.value)}
+                placeholder={canSpeak ? 'Type pinyin or 汉字, or tap 🎤…' : 'Type pinyin, 汉字, or English…'}
                 className="flex-1 px-4 py-3 rounded-full border border-line bg-white focus:outline-none focus:border-ink/40 hanzi" />
               <button type="submit" disabled={busy || !input.trim()} className="w-12 h-12 shrink-0 rounded-full bg-ink text-white grid place-items-center disabled:opacity-40">↑</button>
             </form>
@@ -418,7 +456,7 @@ function Shadowing({ shadow }) {
     if (busyIdx >= 0) return;
     setBusyIdx(idx);
     try {
-      const cap = await captureSpoken({ expectedSyllables: [...item.hanzi].length, timeoutMs: 6000 });
+      const cap = await captureSpoken({ expectedSyllables: [...item.hanzi].length, timeoutMs: 6000, hint: item.hanzi });
       if (cap?.transcript) {
         setHeard(h => ({ ...h, [idx]: true }));
         api.pronObserve({ spoken: { transcript: cap.transcript, alternatives: cap.alternatives, heardTones: null, timing: cap.timing },

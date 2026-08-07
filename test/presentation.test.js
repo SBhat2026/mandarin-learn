@@ -32,10 +32,21 @@ test('image anchor: concrete noun → emoji, verb/no-match → none', () => {
   assert.equal(imageFor('不存在').kind, 'none', 'unknown word → none');
 });
 
-test('modality bias is neutral without signal and leans from behavior', () => {
+test('modality bias follows the stated style, then behavior overrides it', async () => {
+  const { setSetting } = await import('../server/db.js');
+  // With no style stated, and no behavior, there is nothing to lean on.
+  setSetting('learning_style', 'balanced');
   const neutral = presentationBias();
   assert.equal(neutral.channel, 'balanced');
   assert.equal(neutral.audioFirstProb, 0, 'no audio-first until there is signal');
+
+  // A STATED style is real information, unlike an absent signal: it applies from
+  // the first session so text is never hidden behind audio for a reading learner.
+  setSetting('learning_style', 'visual');
+  const stated = presentationBias();
+  assert.equal(stated.channel, 'visual', 'stated style applies before any behavior');
+  assert.equal(stated.audioFirstProb, 0);
+  setSetting('learning_style', 'balanced');
 
   // Repeatedly handling audio without revealing text → auditory lean.
   for (let i = 0; i < 6; i++) recordChannelSignal('kept_audio');
@@ -50,4 +61,18 @@ test('modality bias is neutral without signal and leans from behavior', () => {
   assert.equal(visual.channel, 'visual');
   assert.equal(visual.audioFirstProb, 0, 'visual learners are never hidden-text-first');
   assert.equal(visual.images, true, 'visual learners get image anchors');
+});
+
+test('a stated style is a prior, not a lock — evidence overrides it', async () => {
+  const { setSetting, setModel } = await import('../server/db.js');
+  // Learner SAYS visual but consistently handles audio-only turns. The stated
+  // prior must decay as evidence accumulates, otherwise it would swamp reality.
+  setSetting('learning_style', 'visual');
+  setModel('channel_obs', { reveal_text: 0, kept_audio: 0 });
+  for (let i = 0; i < 8; i++) recordChannelSignal('kept_audio');
+  const overridden = presentationBias();
+  assert.equal(overridden.channel, 'auditory', 'sustained behavior beats the stated style');
+
+  setSetting('learning_style', 'balanced');
+  setModel('channel_obs', { reveal_text: 0, kept_audio: 0 });
 });

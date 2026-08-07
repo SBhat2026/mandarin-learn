@@ -7,6 +7,8 @@ import 'dotenv/config';
 import { pinyinForHanzi, glossForHanzi } from './pronunciation.js';
 import { buildBlueprint, buildBlueprintLocal } from './director.js';
 import { profileForPrompt } from './profile.js';
+import { conversationProfile } from './level.js';
+import { recordSpend } from './spend.js';
 
 // Keep only Chinese characters (+ CJK punctuation) in the hanzi field, so a
 // non-JSON model reply never leaks pinyin/English into the spoken text or the
@@ -29,16 +31,21 @@ const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-inst
 
 // OpenAI-compatible OpenRouter chat. Minimal by design; not reached unless the flag
 // is on. TODO(openrouter): activate for remote hosting (see docs/openrouter.md).
-async function chatOpenRouter(messages, { temperature = 0.6, max_tokens = 512 } = {}) {
+async function chatOpenRouter(messages, { temperature = 0.6, max_tokens = 512, json = false, kind = 'conversation' } = {}) {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) throw new Error('OPENROUTER_API_KEY not set');
   const r = await fetch(OPENROUTER_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-    body: JSON.stringify({ model: OPENROUTER_MODEL, messages, temperature, max_tokens }),
+    // usage.include asks OpenRouter to report the ACTUAL charged cost, so the
+    // spend ledger reflects real billing rather than a local price estimate.
+    body: JSON.stringify({ model: OPENROUTER_MODEL, messages, temperature, max_tokens,
+      usage: { include: true },
+      ...(json ? { response_format: { type: 'json_object' } } : {}) }),
   });
   if (!r.ok) throw new Error(`OpenRouter ${r.status}`);
   const d = await r.json();
+  if (d.usage?.cost != null) recordSpend(d.usage.cost, { kind });
   return { text: d.choices?.[0]?.message?.content ?? '', via: 'openrouter' };
 }
 
@@ -55,12 +62,13 @@ export async function ollamaUp() {
   } catch { return false; }
 }
 
-// Low-level chat completion. Resolution order Ollama → DashScope; OpenRouter only
-// when explicitly enabled (inert by default). Returns assistant text.
-export async function chat(messages, { temperature = 0.6, max_tokens = 512 } = {}) {
+// Low-level chat completion. Resolution order OpenRouter (opt-in) → Ollama →
+// DashScope. `json: true` requests structured output from every backend that
+// supports it (Ollama `format`, OpenAI-compat `response_format`).
+export async function chat(messages, { temperature = 0.6, max_tokens = 512, json = false, kind = 'conversation' } = {}) {
   // 0) OpenRouter (opt-in remote) — off unless USE_OPENROUTER=true.
   if (USE_OPENROUTER) {
-    try { return await chatOpenRouter(messages, { temperature, max_tokens }); }
+    try { return await chatOpenRouter(messages, { temperature, max_tokens, json, kind }); }
     catch (e) { /* fall through to local/cloud so a turn always completes */ }
   }
   // 1) local Ollama
@@ -70,6 +78,7 @@ export async function chat(messages, { temperature = 0.6, max_tokens = 512 } = {
         method: 'POST', signal: sig,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: OLLAMA_MODEL, messages, stream: false, think: false,
+          ...(json ? { format: 'json' } : {}),
           options: { temperature, num_predict: max_tokens } }),
       }), 60000);
       if (r.ok) { const d = await r.json(); return { text: d.message?.content ?? '', via: 'ollama' }; }
@@ -81,7 +90,8 @@ export async function chat(messages, { temperature = 0.6, max_tokens = 512 } = {
     const r = await fetch(DASHSCOPE_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model: DASHSCOPE_MODEL, messages, temperature, max_tokens }),
+      body: JSON.stringify({ model: DASHSCOPE_MODEL, messages, temperature, max_tokens,
+        ...(json ? { response_format: { type: 'json_object' } } : {}) }),
     });
     if (r.ok) { const d = await r.json(); return { text: d.choices?.[0]?.message?.content ?? '', via: 'dashscope' }; }
     throw new Error(`DashScope ${r.status}`);
@@ -148,7 +158,7 @@ function calibrationDirective(signal) {
 // Build the executor system prompt: Qwen PERFORMS the hidden blueprint turn-by-turn,
 // owning wording, curiosity, and tone, while the educational objectives stay
 // invisible. Replaces the old raw-vocab conductor prompt.
-function executorSystem({ blueprint, stage = 'explore', knownWords = [], profileDigest = '', scriptDirective = '', graphSteer = '', conversationMemory = '' }) {
+function executorSystem({ blueprint, stage = 'explore', knownWords = [], profileDigest = '', scriptDirective = '', graphSteer = '', conversationMemory = '', profile = null, extraDirective = '' }) {
   const known = knownWords.slice(0, 300).join(' ');
   const opps = (blueprint.educationalOpportunities || []).slice(0, 3)
     .map(o => `${o.objective}${o.vocab?.length ? ' [' + o.vocab.join(' ') + ']' : ''}`).join(' · ');
@@ -193,7 +203,9 @@ function executorSystem({ blueprint, stage = 'explore', knownWords = [], profile
     // Steer it hard toward plain, reusable, learner-first language.
     'WORDING: use SIMPLE, common, everyday words and short natural sentences. Avoid literary, idiomatic, or stylistic flourish and rare vocabulary unless the learner is clearly advanced. Clarity and reusability beat sounding impressive — say things the way a kind teacher would to a beginner.',
     'Comprehensible input: build turns almost entirely from KNOWN words; introduce at most one new idea per turn and make its meaning obvious from context.',
-    'Keep every turn SHORT (1–2 sentences). Model corrections naturally instead of lecturing. Stay fully in character.',
+    // Turn size scales with measured level (conversationProfile) — a beginner gets
+    // 1-2 short sentences; an advancing learner gets longer, richer turns.
+    `${(profile?.turnDirective) || 'Keep every turn SHORT (1–2 sentences).'} Model corrections naturally instead of lecturing. Stay fully in character.`,
     // Human-likeness: sound like a warm friend, not a textbook or a quiz machine.
     'BE HUMAN: react to how they seem to FEEL, not just to the words. Use light, natural backchannels sometimes (嗯、真的？、哈哈、我也是) and small personal reactions. Vary your turns — do NOT ask a question every single time; sometimes just react, share a tiny bit of yourself, or make a warm comment, then let them respond. Let the topic wander naturally the way friends chat.',
     // Communicative production coaching (Workstream I) — the core mechanic: help them
@@ -208,18 +220,54 @@ function executorSystem({ blueprint, stage = 'explore', knownWords = [], profile
     'The "pinyin" and "english" MUST correspond EXACTLY to the characters you wrote in "hanzi" — never romanize or translate a different sentence than the one in "hanzi". If you do not know the word for something, say it a simpler way using words you know rather than inventing one.',
     'The learner leans on pinyin and English — EVERY reply MUST include full pinyin with tone marks AND a natural English translation. Never leave "pinyin" or "english" empty.',
     known ? `KNOWN words the learner has studied: ${known}` : 'The learner is a true beginner; use only the most basic words.',
+    // Repair pass: when a previous attempt used out-of-set vocabulary, this names the
+    // violations so the regenerated turn stays decodable.
+    extraDirective,
   ].filter(Boolean).join('\n');
 }
 
 // One executor turn: Qwen speaks the blueprint at the current stage. The single
 // code path for BOTH guided lessons and free chat. Returns {hanzi,pinyin,english,note,via}.
-export async function laoshiConverse({ blueprint, stage = 'explore', history = [], userText = '', knownWords = [], profileDigest = '', scriptDirective = '', graphSteer = '', conversationMemory = '' }) {
+// Hardened: JSON mode, one retry on an empty/unparseable reply, and pinyin↔hanzi
+// alignment verification (a model that romanized a different sentence gets its
+// pinyin re-synthesized from the actual hanzi instead of being trusted).
+export async function laoshiConverse({ blueprint, stage = 'explore', history = [], userText = '', knownWords = [], profileDigest = '', scriptDirective = '', graphSteer = '', conversationMemory = '', profile = null, extraDirective = '' }) {
+  const prof = profile || conversationProfile();
   const messages = [
-    { role: 'system', content: executorSystem({ blueprint, stage, knownWords, profileDigest, scriptDirective, graphSteer, conversationMemory }) },
-    ...history.slice(-10).map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })),
+    { role: 'system', content: executorSystem({ blueprint, stage, knownWords, profileDigest, scriptDirective, graphSteer, conversationMemory, profile: prof, extraDirective }) },
+    ...history.slice(-prof.historyWindow).map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })),
   ];
   if (userText) messages.push({ role: 'user', content: userText });
-  return parseTeacher(await chat(messages, { temperature: 0.6, max_tokens: 400 }));
+  const opts = { temperature: 0.6, max_tokens: prof.maxTokens, json: true };
+  let reply = parseTeacher(await chat(messages, opts));
+  if (!reply.hanzi) {
+    // One retry with a slightly higher temperature — a blank turn strands the learner.
+    reply = parseTeacher(await chat(messages, { ...opts, temperature: 0.8 }));
+  }
+  return verifyAlignment(reply);
+}
+
+// Count Mandarin syllables in a pinyin string (vowel-group heuristic; handles
+// unspaced multi-syllable words like "xǐhuan" well enough for a mismatch test).
+function syllableCount(pinyin = '') {
+  const s = String(pinyin).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const m = s.match(/[aeiouü](?:[aeiouü])*(?:ng|n|r)?/g);
+  return m ? m.length : 0;
+}
+
+// The pinyin/english must describe the hanzi actually shown. When the syllable
+// count disagrees badly with the character count, the model romanized something
+// else — re-derive pinyin from the hanzi (dictionary-backed) rather than trust it.
+function verifyAlignment(reply) {
+  if (!reply.hanzi) return reply;
+  const cjkLen = [...reply.hanzi].filter(c => /[㐀-鿿]/.test(c)).length;
+  if (!cjkLen) return reply;
+  const syl = syllableCount(reply.pinyin);
+  if (Math.abs(syl - cjkLen) > Math.max(1, Math.round(cjkLen * 0.25))) {
+    const derived = pinyinForHanzi(reply.hanzi);
+    if (derived) reply = { ...reply, pinyin: derived };
+  }
+  return reply;
 }
 
 // Legacy shim: the current /api/lesson/turn hands a plan + persona. Build (or reuse)

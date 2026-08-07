@@ -82,6 +82,10 @@ function contentMigrate(conn) {
   addColumn(conn, 'words', 'example_sentence_id', 'INTEGER');
   addColumn(conn, 'words', 'concrete', 'INTEGER DEFAULT 0');
   addColumn(conn, 'words', 'particle', 'INTEGER DEFAULT 0');
+  // Re-enrichment pass (Claude): 'spoken' | 'written' | 'both', and a sub-band for
+  // the collapsed HSK 7-9 level (7|8|9, derived from frequency terciles).
+  addColumn(conn, 'words', 'register', 'TEXT');
+  addColumn(conn, 'words', 'hsk_band', 'INTEGER');
 }
 
 // Per-user state migrations: card hint column, seed retention targets, collapse any

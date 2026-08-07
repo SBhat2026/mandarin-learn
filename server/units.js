@@ -1,25 +1,96 @@
 import { db } from './db.js';
 import { TOPIC_SET } from './taxonomy.js';
 
-// Rebuild the unit path. Frequency-first, boosted for interest topics; ~size words
-// per unit; each named after its dominant topic; sentences segmented + attached.
+const CJK = /[一-鿿]/;
+const chars = (s) => [...(s || '')].filter(ch => CJK.test(ch));
+
+// Rebuild the unit path. Ordering is frequency-first, then shaped by:
+//   • interest boost (clean re-enriched tags — function words carry none)
+//   • register: literary/written-only words wait (speaking-first app)
+//   • capability alignment: the early curriculum's capabilities pull their best
+//     serving words forward, so early units teach what early conversations need
+//   • confusable separation: visually-confusable characters never land in the
+//     same unit (他/她/它 style pairs get ≥1 unit of spacing)
+// ~size words per unit; each named after its dominant topic; sentences attached.
 // Shared by the CLI (ingest/build-units.js) and the onboarding endpoint.
 export function rebuildUnits(interestTopics = [], { size = 20, boost = 0.5 } = {}) {
   const sentinel = backfillFreq();
   const interest = new Set((interestTopics || []).filter(t => TOPIC_SET.has(t)));
-  const words = db().prepare('SELECT id, hanzi, topics, freq_rank FROM words').all();
+  const words = db().prepare('SELECT id, hanzi, topics, freq_rank, register, particle FROM words').all();
+  const capPull = capabilityPull();
   for (const w of words) {
     let topics = [];
     try { topics = JSON.parse(w.topics || '[]'); } catch {}
     w._topics = topics;
     const boosted = topics.some(t => interest.has(t));
-    w._eff = (w.freq_rank ?? sentinel) * (boosted ? boost : 1);
+    let eff = (w.freq_rank ?? sentinel) * (boosted ? boost : 1);
+    if (w.register === 'written') eff *= 1.6;                 // literary words wait
+    const pull = capPull.get(w.id);
+    if (pull != null) eff = Math.min(eff, pull);              // capability curriculum pull
+    w._eff = eff;
   }
   words.sort((a, b) => a._eff - b._eff || (a.freq_rank ?? sentinel) - (b.freq_rank ?? sentinel));
 
-  const { units, wordUnit } = writeUnits(words, size);
+  const ordered = separateConfusables(words, size);
+  const { units, wordUnit } = writeUnits(ordered, size);
   const cover = attachSentences(wordUnit);
   return { units: units.length, words: words.length, ...cover };
+}
+
+// Early capabilities (curriculum order) pull their best-serving words forward: the
+// k-th capability's top words get an effective rank around k*size*0.8, clustering
+// early units around what early conversations actually need.
+function capabilityPull(capCount = 14, perCap = 6) {
+  const pull = new Map();
+  let caps = [];
+  try {
+    caps = db().prepare(`SELECT c.id, c.ordering FROM capabilities c ORDER BY c.ordering ASC LIMIT ?`).all(capCount);
+  } catch { return pull; }
+  for (let k = 0; k < caps.length; k++) {
+    const refs = db().prepare(`SELECT ref, weight FROM capability_requirements WHERE capability_id=? AND kind='vocab'`).all(caps[k].id);
+    for (const r of refs) {
+      const [kind, ...rest] = r.ref.split(':');
+      const val = rest.join(':');
+      let rows = [];
+      if (kind === 'word') rows = db().prepare('SELECT id FROM words WHERE hanzi=?').all(val);
+      else if (kind === 'topic') rows = db().prepare(`SELECT id FROM words WHERE topics LIKE ? AND particle=0
+        ORDER BY COALESCE(freq_rank,999999) ASC LIMIT ?`).all(`%"${val}"%`, perCap);
+      else if (kind === 'pos') rows = db().prepare(`SELECT id FROM words WHERE pos LIKE ? AND particle=0
+        ORDER BY COALESCE(freq_rank,999999) ASC LIMIT ?`).all(`%"${val}"%`, Math.min(perCap, 4));
+      const target = (k + 1) * 16;
+      for (const row of rows) if (!pull.has(row.id) || pull.get(row.id) > target) pull.set(row.id, target);
+    }
+  }
+  return pull;
+}
+
+// Greedy re-packing: a word whose character is a visual-confusion peer of a
+// character already in the CURRENT unit is deferred to a later unit, so
+// look-alikes are never met together (they're contrasted later, via families).
+function separateConfusables(sorted, size) {
+  const confus = new Map();   // char → Set(peer chars)
+  for (const e of db().prepare(`SELECT src, dst FROM graph_edges WHERE rel='visual_confusion'`).all()) {
+    if (!confus.has(e.src)) confus.set(e.src, new Set());
+    confus.get(e.src).add(e.dst);
+  }
+  const out = [];
+  let deferred = [];
+  let unitChars = new Set();
+  const conflicts = (w) => chars(w.hanzi).some(c =>
+    [...(confus.get(c) || [])].some(peer => unitChars.has(peer)));
+  let queue = [...sorted];
+  while (queue.length || deferred.length) {
+    if (!queue.length) { queue = deferred; deferred = []; }
+    const w = queue.shift();
+    if (conflicts(w)) { deferred.push(w); continue; }
+    out.push(w);
+    for (const c of chars(w.hanzi)) unitChars.add(c);
+    if (out.length % size === 0) {           // unit boundary → reset, deferred re-enter
+      unitChars = new Set();
+      if (deferred.length) { queue = [...deferred, ...queue]; deferred = []; }
+    }
+  }
+  return out;
 }
 
 function backfillFreq() {
@@ -47,7 +118,7 @@ function writeUnits(ordered, size) {
   const wordUnit = new Map();
   const units = [];
   const usedNames = new Map();
-  const threshold = Math.max(4, Math.round(size * 0.3)); // topic must cover ≥30% (or 4)
+  const threshold = Math.max(4, Math.round(size * 0.25)); // topic must cover ≥25% (or 4)
   let coreN = 0;
   const tx = db().transaction(() => {
     for (let i = 0, pos = 0; i < ordered.length; i += size, pos++) {

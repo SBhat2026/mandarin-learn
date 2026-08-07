@@ -6,7 +6,7 @@
 //
 // Distinction from Workstream F: THIS sets the cross-session BASELINE band; live
 // difficulty calibration handles WITHIN-session swings. They cooperate, stay distinct.
-import { db, getModel, setModel } from './db.js';
+import { db, getModel, setModel, getSetting } from './db.js';
 import { State } from './fsrs.js';
 
 const CJK = /[一-鿿]/;
@@ -133,6 +133,39 @@ export function bandFit(rank, band = newWordBand()) {
   const d = Math.abs(Math.log(rank + 10) - Math.log(band.center + 10));
   const spread = Math.log(band.max + 10) - Math.log(band.center + 10);
   return clamp(1 - d / (spread || 1), 0, 1) * (band.confidence ?? 1);
+}
+
+// ---- conversation progression -----------------------------------------------
+// How BIG and HARD a conversation should be, derived from measured level. This is
+// what makes conversations grow with progression instead of staying pinned at
+// "1-2 sentences, 4-8 exchanges" forever. t ∈ [0,1] blends solid vocabulary breadth
+// with inferred CEFR; every knob scales monotonically with it.
+export function conversationProfile() {
+  const knownN = db().prepare(`SELECT COUNT(DISTINCT c.item_id) c
+    FROM cards c LEFT JOIN acquisition a ON a.item_type='word' AND a.item_id=c.item_id
+    WHERE c.item_type='word' AND (COALESCE(a.stage,0) >= 2 OR c.state >= ${State.Review})`).get().c;
+  const { cefr, confidence } = levelCefr();
+  const breadth = Math.min(1, knownN / 500);
+  const levelPart = cefr != null ? (cefr / 4) * confidence : 0;
+  // "Stretch me" (visible learner control): push everything one notch harder.
+  const stretch = getSetting('stretch_mode', false) ? 0.18 : 0;
+  const t = clamp(0.7 * breadth + 0.3 * levelPart + stretch, 0, 1);
+
+  const minEx = 4 + Math.round(t * 6);           // 4 → 10
+  const maxEx = 8 + Math.round(t * 10);          // 8 → 18
+  return {
+    t: Number(t.toFixed(2)),
+    sentencesPerTurn: 1 + Math.round(t * 2.4),   // 1 → 3(–4)
+    exchanges: [minEx, maxEx],
+    newConcepts: 1 + Math.floor(t * 2.2),        // 1 → 3
+    maxTokens: 400 + Math.round(t * 400),        // 400 → 800
+    historyWindow: 10 + Math.round(t * 14),      // 10 → 24
+    turnDirective: t < 0.25
+      ? 'Keep every turn SHORT (1–2 simple sentences).'
+      : t < 0.6
+        ? 'Turns may be 2–3 sentences. Mix statement + question; add a small detail before asking.'
+        : 'Turns may be 3–4 sentences with richer clauses (因为/但是/如果). Tell small anecdotes; ask questions that invite longer answers.',
+  };
 }
 
 // Rough learner CEFR (0..4 → A0..B2) from inferred HSK, for capability difficulty

@@ -4,7 +4,7 @@
 // Per word we track six independent skill dimensions. One FSRS "memory" card
 // schedules WHEN a word returns; these sub-scores pick WHICH exercise to show
 // (always the weakest unlocked dimension) and drive the acquisition stage.
-import { db, DIMENSIONS, getModel, setModel } from './db.js';
+import { db, DIMENSIONS, getModel, setModel, getSetting } from './db.js';
 import { weakTone } from './tone.js';
 import { getInterests } from './interests.js';
 
@@ -92,19 +92,29 @@ export function weakestDimension(wordId, { hasSentence = false, avoid = null, bi
 
 // The learner's globally weakest modality (from inferred per-dimension ability),
 // as a small bias map to feed weakestDimension. Only meaningful once there's data.
+// A STATED style ('visual') is applied on top: reading/meaning get a standing lift
+// and listening is damped, so a reading-oriented learner isn't fed audio drills
+// just because listening scores lowest. It's damped, never zeroed — some listening
+// still matters, and the inferred signal keeps working underneath.
 export function modalityBias() {
+  const style = getSetting('learning_style', 'visual');
   const t = traits();
   const ab = t?.dimAbility;
-  if (!ab) return null;
-  const scored = DIMENSIONS
-    .map(d => ({ d, a: ab[d]?.ability }))
-    .filter(x => x.a != null);
-  if (scored.length < 2) return null;
-  scored.sort((a, b) => a.a - b.a);
   const bias = {};
-  bias[scored[0].d] = 0.2;                          // weakest modality gets a nudge
-  if (scored[1]) bias[scored[1].d] = 0.08;
-  return bias;
+  if (ab) {
+    const scored = DIMENSIONS.map(d => ({ d, a: ab[d]?.ability })).filter(x => x.a != null);
+    if (scored.length >= 2) {
+      scored.sort((a, b) => a.a - b.a);
+      bias[scored[0].d] = 0.2;                      // weakest modality gets a nudge
+      if (scored[1]) bias[scored[1].d] = 0.08;
+    }
+  }
+  if (style === 'visual') {
+    bias.reading = (bias.reading || 0) + 0.25;
+    bias.meaning = (bias.meaning || 0) + 0.1;
+    bias.listening = (bias.listening || 0) - 0.3;
+  }
+  return Object.keys(bias).length ? bias : null;
 }
 
 // ── Automatic modality emphasis (Workstream J) ──────────────────────────────
@@ -140,7 +150,14 @@ export function presentationBias() {
   if (ab?.listening?.ability != null && ab?.reading?.ability != null) {
     ability = clamp((ab.listening.ability - ab.reading.ability) * 2, -1, 1);
   }
-  const lean = clamp(0.6 * behavior + 0.4 * ability, -1, 1);   // + auditory, - visual
+  // A stated style is a PRIOR, not a lock. It carries full weight on day one (it is
+  // the only information we have), then DECAYS as real behaviour accumulates — so a
+  // learner who says "visual" but consistently thrives on audio still gets moved.
+  // Without the decay a fixed prior would swamp any realistic amount of evidence.
+  const style = getSetting('learning_style', 'visual');
+  const prior = style === 'visual' ? -0.5 : style === 'auditory' ? 0.5 : 0;
+  const priorWeight = 1 / (1 + behaviorN / 4);
+  const lean = clamp(prior * priorWeight + 0.6 * behavior + 0.4 * ability, -1, 1);   // + auditory, - visual
   const confidence = clamp(behaviorN / 8 + (ab ? 0.3 : 0), 0, 1);
 
   return {

@@ -65,6 +65,10 @@ export function ScriptBubble({ hanzi, pinyin, english, mode = 'pinyin', hanziSiz
   );
 }
 
-export function scriptModeFromLevel(level = 0) {
+// `pref: 'hanzi'` (characters-first learners) never drops below 'balanced' —
+// characters are the headline from day one, pinyin rides underneath and only
+// fades to hover-reveal once reading is actually earned.
+export function scriptModeFromLevel(level = 0, pref = 'auto') {
+  if (pref === 'hanzi') return level < 0.66 ? 'balanced' : 'hanzi';
   return level < 0.33 ? 'pinyin' : level < 0.66 ? 'balanced' : 'hanzi';
 }

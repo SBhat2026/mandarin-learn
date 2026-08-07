@@ -73,7 +73,7 @@ export function newCandidates(limit, introduced) {
     if (m?.phonetic) knownFamilies.add('p:' + m.phonetic);
   }
 
-  const pool = db().prepare(`SELECT w.id, w.hanzi, w.freq_rank, w.hsk_level, w.concrete, w.particle, w.topics
+  const pool = db().prepare(`SELECT w.id, w.hanzi, w.freq_rank, w.hsk_level, w.concrete, w.particle, w.topics, w.register
     FROM words w
     WHERE NOT EXISTS (SELECT 1 FROM cards c WHERE c.item_type='word' AND c.item_id=w.id)
     ORDER BY COALESCE(w.freq_rank, 999999) ASC LIMIT 4000`).all();
@@ -111,9 +111,11 @@ export function newCandidates(limit, introduced) {
     // cards — push them well below concrete vocabulary so they surface only once
     // the learner has words to embed them in.
     const particlePenalty = w.particle ? 6 : 0;
+    // Speaking-first app: literary/formal-only words wait until the learner reads well.
+    const registerPenalty = w.register === 'written' ? 1.5 : 0;
     const bandBoost = 1.5 * bandFit(rank, band);
     const score = 3 * (w.concrete ?? 1) + freqBoost + 1.5 * fracKnown
-      + Math.min(2, familyBonus) + interestBoost(w.topics) + bandBoost - levelPenalty - loadPenalty - particlePenalty;
+      + Math.min(2, familyBonus) + interestBoost(w.topics) + bandBoost - levelPenalty - loadPenalty - particlePenalty - registerPenalty;
     return { id: w.id, hanzi: w.hanzi, score };
   }).sort((a, b) => b.score - a.score);
 

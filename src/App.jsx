@@ -95,7 +95,32 @@ export default function App() {
             <Route path="/onboarding" element={<Onboarding onDone={() => api.meta().then(setMeta)} />} />
           </Routes>
         </div>
+        <SpendFooter />
       </main>
+    </div>
+  );
+}
+
+// A deliberately quiet readout of metered API spend. Not a dashboard: one line,
+// faint, at the very bottom — enough to notice a jump without it becoming part of
+// the study surface. Hidden entirely when nothing is metered (all-local setup).
+function SpendFooter() {
+  const [s, setS] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () => api.spend?.().then(d => alive && setS(d)).catch(() => {});
+    load();
+    const t = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+  if (!s || (!s.total && !s.remaining)) return null;
+  return (
+    <div className="mt-10 pt-3 border-t border-line/60 text-[11px] text-ink-faint/70 flex items-center gap-3">
+      <span>${s.today.toFixed(3)} today</span>
+      <span>·</span>
+      <span>${s.total.toFixed(2)} total</span>
+      {s.remaining != null && <><span>·</span><span>${s.remaining.toFixed(2)} left</span></>}
+      {s.throttled && <span className="text-amber-600/70" title="New stories are generated less often while spend is high; conversation is unaffected.">· easing story frequency</span>}
     </div>
   );
 }

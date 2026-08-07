@@ -25,6 +25,7 @@ export default function ExerciseFlow() {
   const [phase, setPhase] = useState('prompt');   // 'teach' | 'prompt' | 'revealed'
   const [heard, setHeard] = useState(null);
   const [done, setDone] = useState({ count: 0, again: 0 });
+  const [family, setFamily] = useState(null);      // due character-family lesson (interstitial)
   const startedAt = useRef(Date.now());
   const navigate = useNavigate();
 
@@ -34,6 +35,7 @@ export default function ExerciseFlow() {
       setPhase(l.items[0]?.teach ? 'teach' : 'prompt');
       startedAt.current = Date.now();
     });
+    api.familyNext().then(r => setFamily(r.lesson || null)).catch(() => {});
   }, []);
   useEffect(load, [load]);
 
@@ -80,6 +82,7 @@ export default function ExerciseFlow() {
   }, [phase, reveal, grade]);
 
   if (!lesson) return <Loading />;
+  if (family) return <FamilyLesson lesson={family} onDone={() => setFamily(null)} />;
   if (!lesson.items.length) return <AllDone counts={lesson.counts} onReload={load} />;
   if (idx >= lesson.items.length) return <SessionComplete done={done} onReload={load} navigate={navigate} />;
 
@@ -97,6 +100,94 @@ export default function ExerciseFlow() {
 }
 
 // ---------------------------------------------------------------------------
+// Character-family lesson: the transferable rule (radical meaning / phonetic sound),
+// grounded in known characters, extended to new frontier characters, closed with a
+// one-tap self-check that feeds the family's hidden mastery + schedule.
+function FamilyLesson({ lesson, onDone }) {
+  const [picked, setPicked] = useState(null);
+  const correct = picked != null && picked === lesson.check?.answer;
+  function pick(opt) {
+    if (picked != null) return;
+    setPicked(opt);
+    api.familyOutcome(lesson.key, opt === lesson.check.answer).catch(() => {});
+  }
+  function finish() {
+    if (!lesson.check && picked == null) api.familyOutcome(lesson.key, true).catch(() => {});
+    onDone();
+  }
+  return (
+    <div className="max-w-lg mx-auto animate-fade">
+      <div className="text-[12px] uppercase tracking-widest text-jade-600 mb-3">Character family</div>
+      <div className="card-face p-6">
+        <div className="flex items-center gap-4 mb-3">
+          <span className="hanzi text-6xl text-ink">{lesson.component}</span>
+          <div>
+            {lesson.meaning && <div className="text-lg text-ink">"{lesson.meaning}"</div>}
+            {lesson.sound && <div className="text-lg text-jade-700">sounds like <TonedPinyin pinyin={lesson.sound} /></div>}
+            <div className="text-sm text-ink-soft mt-1">{lesson.lesson}</div>
+          </div>
+        </div>
+
+        <div className="text-[12px] text-ink-faint mt-4 mb-2">You already know these:</div>
+        <div className="flex flex-wrap gap-2">
+          {lesson.knownMembers.map((m, i) => (
+            <button key={i} onClick={() => speak(m.knownWord?.hanzi || m.char)}
+              className="px-3 py-2 rounded-2xl bg-white border border-line text-left hover:border-jade-300">
+              <span className="hanzi text-2xl text-ink">{m.char}</span>
+              <span className="text-[12px] text-jade-700 ml-1.5">{m.pinyin}</span>
+              {m.knownWord && <div className="text-[11px] text-ink-faint">{m.knownWord.hanzi} · {m.knownWord.gloss}</div>}
+            </button>
+          ))}
+        </div>
+
+        {lesson.frontier.length > 0 && (
+          <>
+            <div className="text-[12px] text-jade-700 mt-5 mb-2">…so you can now read these too:</div>
+            <div className="flex flex-wrap gap-2">
+              {lesson.frontier.map((f, i) => (
+                <button key={i} onClick={() => speak(f.exampleWord?.hanzi || f.char)}
+                  className="px-3 py-2 rounded-2xl bg-jade-50/70 border border-jade-200 text-left">
+                  <span className="hanzi text-2xl text-ink">{f.char}</span>
+                  <span className="text-[12px] text-jade-700 ml-1.5">{f.pinyin}</span>
+                  <div className="text-[11px] text-ink-faint">{f.definition}{f.exampleWord ? ` · ${f.exampleWord.hanzi} ${f.exampleWord.gloss}` : ''}</div>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        {lesson.check && (
+          <div className="mt-5 pt-4 border-t border-line">
+            <div className="text-sm text-ink-soft mb-2">{lesson.check.prompt}</div>
+            <div className="flex flex-wrap gap-2">
+              {lesson.check.options.map((opt, i) => {
+                const state = picked == null ? '' : opt === lesson.check.answer ? 'right' : opt === picked ? 'wrong' : 'dim';
+                return (
+                  <button key={i} onClick={() => pick(opt)} disabled={picked != null}
+                    className={`hanzi text-2xl px-4 py-2 rounded-2xl border transition ${
+                      state === 'right' ? 'bg-jade-500 text-white border-jade-500'
+                        : state === 'wrong' ? 'bg-rose-50 text-rose-600 border-rose-200'
+                        : state === 'dim' ? 'bg-white text-ink-faint border-line opacity-50'
+                        : 'bg-white text-ink border-line hover:border-ink/30'}`}>{opt}</button>
+                );
+              })}
+            </div>
+            {picked != null && (
+              <div className={`text-sm mt-2 ${correct ? 'text-jade-700' : 'text-rose-600'}`}>
+                {correct ? 'Right — the family holds.' : `It was ${lesson.check.answer} — the others share ${lesson.component}.`}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      <button onClick={finish} disabled={lesson.check && picked == null}
+        className="mt-4 w-full py-3 rounded-full bg-ink text-white font-medium hover:opacity-90 transition disabled:opacity-40">
+        Continue →
+      </button>
+    </div>
+  );
+}
+
 function Progress({ idx, total, isNew, dimension }) {
   return (
     <div className="mb-8">
@@ -272,7 +363,7 @@ function RecordControl({ item, onHeard }) {
     if (!supported) { onHeard({ transcript: '', match: false, unsupported: true }); return; }
     setState('listening');
     try {
-      const cap = await captureSpoken({ expectedSyllables, timeoutMs: 6000, onLevel: (r) => setLevel(r) });
+      const cap = await captureSpoken({ expectedSyllables, timeoutMs: 6000, onLevel: (r) => setLevel(r), hint: item.hanzi });
       const match = cap.transcript ? normalizeHanzi(cap.transcript).includes(normalizeHanzi(item.hanzi)) : false;
       // Reveal even when STT heard nothing but the mic captured voice — the
       // acoustic tone signal still counts.

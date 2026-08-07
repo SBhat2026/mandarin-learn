@@ -11,3 +11,5 @@ ingest/sources/*
 !ingest/sources/.gitkeep
 test/fixtures/
 .DS_Store
+data/spend.json
+data/*.json

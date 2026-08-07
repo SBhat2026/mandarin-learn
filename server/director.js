@@ -22,6 +22,7 @@
 //   desiredLearnerFeeling : string   "I had an interesting conversation"
 import { hasApiKey, completeJson, claudeModelPref, resolveModel } from './anthropic.js';
 import { profileForPrompt, recentThreads } from './profile.js';
+import { getSetting } from './db.js';
 
 // The canonical question hierarchy (Workstream G). The Director orders a subset
 // into questionLadder; higher rungs are preferred as capability mastery rises.
@@ -63,6 +64,8 @@ async function buildBlueprintClaude(plan, ctx) {
     scriptLevel: plan.scriptLevel,
     recentMetrics: ctx.metrics || null,
     preferredQuestionRungs: rungs,
+    // Visible learner control: topics they explicitly asked to talk about today.
+    requestedTopics: getSetting('chat_topics', []) || [],
   };
   const tier = ctx.modelPref || claudeModelPref();
   const out = await completeJson({
@@ -109,16 +112,21 @@ export function buildBlueprintLocal(plan, ctx = {}) {
   const goal = cap ? goalPhrase(cap) : 'have a relaxed chat and reuse familiar words';
   const rungs = ladderForMastery(ctx.capabilityMastery ?? 0);
 
-  // Personal hooks: prefer an open thread, then a stated interest, then the scene.
+  // Personal hooks: an explicitly-requested topic wins, then an open thread, then a
+  // stated interest, then the scene.
+  const requested = (getSetting('chat_topics', []) || [])[0] || null;
   const interest = firstInterest(profile);
   const connections = [];
+  if (requested) connections.push(`they asked to talk about ${requested} today — honor that`);
   if (threads[0]) connections.push(`follow up on: ${threads[0]}`);
   if (interest) connections.push(`they enjoy ${interest} — open there`);
-  const opening = threads[0]
-    ? `Pick up the open thread naturally — ask how "${threads[0]}" is going.`
-    : interest
-      ? `Open by connecting to something they like (${interest}) and ask a warm question about it.`
-      : `No real profile facts exist yet, so DO NOT invent any personal history or past events. Open from a concrete, grounded thing in the here-and-now (something simple and everyday) and ask one easy question about it. Never fabricate a memory, and never open with a generic "so, what shall we discuss?" prompt.`;
+  const opening = requested
+    ? `They chose to talk about ${requested} today — open there directly with a warm, concrete question.`
+    : threads[0]
+      ? `Pick up the open thread naturally — ask how "${threads[0]}" is going.`
+      : interest
+        ? `Open by connecting to something they like (${interest}) and ask a warm question about it.`
+        : `No real profile facts exist yet, so DO NOT invent any personal history or past events. Open from a concrete, grounded thing in the here-and-now (something simple and everyday) and ask one easy question about it. Never fabricate a memory, and never open with a generic "so, what shall we discuss?" prompt.`;
 
   return {
     conversationGoal: goal,
