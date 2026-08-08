@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { api, isDemo, currentUser } from './lib/api.js';
+import { api, isDemo, currentUser, accessToken, setAccessToken, verifyAccess, setLockHandler } from './lib/api.js';
 import Home from './pages/Home.jsx';
 import Session from './pages/Session.jsx';
 import ToneTrainer from './pages/ToneTrainer.jsx';
@@ -25,16 +25,28 @@ export default function App() {
   // Multi-user gate: require a chosen local user before loading the app (skipped in
   // the static demo, which has no backend / user routing).
   const [user, setUser] = useState(isDemo ? 'demo' : currentUser());
+  // Hosted instances add a shared passphrase in front of everything. `null` while
+  // we're still asking the server whether one is needed.
+  const [locked, setLocked] = useState(null);
   const navigate = useNavigate();
   const loc = useLocation();
 
   useEffect(() => {
-    if (!user) return;   // wait for a user to be picked
+    if (isDemo) { setLocked(false); return; }
+    setLockHandler(() => setLocked(true));
+    verifyAccess(accessToken()).then(r => setLocked(r.required && !r.ok)).catch(() => setLocked(false));
+  }, []);
+
+  useEffect(() => {
+    if (!user || locked !== false) return;   // wait for a user AND an unlocked instance
     api.meta().then(m => {
       setMeta(m);
       if (!m.onboarding?.onboarded && m.counts.units > 0) navigate('/onboarding');
     }).catch(() => setMeta({ error: true }));
-  }, [user]);
+  }, [user, locked]);
+
+  if (locked === null) return null;                       // brief: gate status unknown
+  if (locked) return <AccessGate onUnlock={() => setLocked(false)} />;
 
   // Switching user reloads everyone's data cleanly.
   function onSwitch() { window.location.reload(); }
@@ -97,6 +109,45 @@ export default function App() {
         </div>
         <SpendFooter />
       </main>
+    </div>
+  );
+}
+
+// The shared-passphrase gate for hosted instances. Deliberately plain: this is a
+// doorway, not a product surface, and it never claims to be an account system.
+function AccessGate({ onUnlock }) {
+  const [pass, setPass] = useState('');
+  const [state, setState] = useState('idle');   // idle | checking | wrong
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!pass.trim() || state === 'checking') return;
+    setState('checking');
+    try {
+      const r = await verifyAccess(pass.trim());
+      if (r.ok) { setAccessToken(pass.trim()); onUnlock(); }
+      else { setState('wrong'); setPass(''); }
+    } catch { setState('wrong'); }
+  }
+
+  return (
+    <div className="min-h-screen grid place-items-center px-6">
+      <form onSubmit={submit} className="w-full max-w-sm text-center">
+        <div className="hanzi text-5xl text-ink mb-3">学</div>
+        <h1 className="text-xl font-semibold text-ink mb-1.5">Mandarin Learn</h1>
+        <p className="text-sm text-ink-soft mb-6">Private test build — enter the passphrase you were given.</p>
+        <input
+          type="password" value={pass} autoFocus
+          onChange={(e) => { setPass(e.target.value); if (state === 'wrong') setState('idle'); }}
+          placeholder="Passphrase"
+          className={`w-full px-4 py-3 rounded-full border bg-white text-center focus:outline-none transition
+            ${state === 'wrong' ? 'border-rose-300 focus:border-rose-400' : 'border-line focus:border-ink/40'}`} />
+        {state === 'wrong' && <div className="text-[13px] text-rose-600 mt-2">Not quite — try again.</div>}
+        <button type="submit" disabled={!pass.trim() || state === 'checking'}
+          className="mt-4 w-full py-3 rounded-full bg-ink text-white font-medium hover:opacity-90 transition disabled:opacity-40">
+          {state === 'checking' ? 'Checking…' : 'Enter'}
+        </button>
+      </form>
     </div>
   );
 }

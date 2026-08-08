@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.env
+.claude
+test
+docs
+ingest/sources
+data/users
+data/spend.json
+data/app.db-wal
+data/app.db-shm
+data/media/tts
+public/demo
+*.log
+.DS_Store

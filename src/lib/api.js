@@ -12,13 +12,39 @@ const USER_KEY = 'mandarin.user';
 export function currentUser() { try { return localStorage.getItem(USER_KEY) || ''; } catch { return ''; } }
 export function setCurrentUser(slug) { try { slug ? localStorage.setItem(USER_KEY, slug) : localStorage.removeItem(USER_KEY); } catch {} }
 
-async function req(path, opts) {
-  const headers = { 'content-type': 'application/json' };
+// Shared-passphrase gate for the hosted instance (unused locally, where the
+// server leaves it disabled). Kept beside the user slug so every request carries
+// both automatically.
+const ACCESS_KEY = 'mandarin.access';
+export function accessToken() { try { return localStorage.getItem(ACCESS_KEY) || ''; } catch { return ''; } }
+export function setAccessToken(v) { try { v ? localStorage.setItem(ACCESS_KEY, v) : localStorage.removeItem(ACCESS_KEY); } catch {} }
+
+// Set when any request comes back 401 so the app can raise the gate.
+let onLocked = null;
+export function setLockHandler(fn) { onLocked = fn; }
+
+export function authHeaders() {
+  const h = {};
   const u = currentUser();
-  if (u) headers['x-user'] = u;
+  if (u) h['x-user'] = u;
+  const a = accessToken();
+  if (a) h['x-access'] = a;
+  return h;
+}
+
+async function req(path, opts) {
+  const headers = { 'content-type': 'application/json', ...authHeaders() };
   const res = await fetch(path, { ...opts, headers: { ...headers, ...(opts?.headers || {}) } });
+  if (res.status === 401) { onLocked?.(); throw new Error('access required'); }
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
   return res.json();
+}
+
+// Verify a passphrase against the server before storing it.
+export async function verifyAccess(pass) {
+  const r = await fetch('/api/auth/check', { headers: pass ? { 'x-access': pass } : {} });
+  if (!r.ok) return { required: true, ok: false };
+  return r.json();
 }
 
 async function demo(file) {

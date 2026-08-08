@@ -2,7 +2,7 @@
 //   1. imported native audio (real recordings from decks)
 //   2. server neural TTS (/api/tts — Edge zh-CN voices, cached mp3s)
 //   3. browser speechSynthesis (offline last resort)
-import { mediaUrl, isDemo, currentUser } from './api.js';
+import { mediaUrl, isDemo, authHeaders } from './api.js';
 import { recordUtterance, classifyTones, pitchSupported } from './pitch.js';
 
 let _audio;
@@ -21,7 +21,7 @@ async function neuralUrl(text, slow) {
   const key = (slow ? 's|' : 'n|') + text;
   if (_ttsCache.has(key)) return _ttsCache.get(key);
   const p = fetch(`/api/tts?text=${encodeURIComponent(text)}${slow ? '&slow=1' : ''}`,
-    { headers: currentUser() ? { 'x-user': currentUser() } : {} })
+    { headers: authHeaders() })
     .then(r => { if (!r.ok) throw new Error('tts ' + r.status); return r.json(); })
     .then(d => d.url);
   p.catch(() => _ttsCache.delete(key));
@@ -173,8 +173,7 @@ async function recordBlob({ maxMs = 6000, stopSignal } = {}) {
 async function whisperTranscribe(blob, hint = '') {
   const r = await fetch('/api/stt' + (hint ? `?hint=${encodeURIComponent(hint)}` : ''), {
     method: 'POST',
-    headers: { 'content-type': blob.type || 'application/octet-stream',
-      ...(currentUser() ? { 'x-user': currentUser() } : {}) },
+    headers: { 'content-type': blob.type || 'application/octet-stream', ...authHeaders() },
     body: blob,
   });
   if (!r.ok) throw new Error('stt ' + r.status);

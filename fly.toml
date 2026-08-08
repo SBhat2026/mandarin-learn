@@ -1,0 +1,52 @@
+# Fly.io deployment. One always-on machine with a persistent volume for SQLite.
+#
+#   fly launch --no-deploy --copy-config    (first time: creates the app)
+#   fly volumes create data --size 1 --region <your-region>
+#   fly secrets set OPENROUTER_API_KEY=... ANTHROPIC_API_KEY=... GROQ_API_KEY=... APP_PASSWORD=...
+#   fly deploy
+app = "mandarin-learn"
+primary_region = "ewr"
+
+[build]
+
+[env]
+  SERVE_APP = "1"
+  PORT = "8080"
+  USE_OPENROUTER = "true"
+  OPENROUTER_MODEL = "qwen/qwen3-235b-a22b"
+  APP_DB_PATH = "/data/app.db"
+  APP_MEDIA_DIR = "/data/media"
+  APP_USERS_DIR = "/data/users"
+  SPEND_LEDGER = "/data/spend.json"
+
+[[mounts]]
+  source = "data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # SQLite means a single writer: keep exactly one machine, always on. Suspending
+  # would also make the first request after idle slow, which reads as "broken" to
+  # a tester.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 40
+
+[checks]
+  [checks.health]
+    type = "http"
+    port = 8080
+    path = "/api/health"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

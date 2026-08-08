@@ -30,8 +30,9 @@ import { nextFamily, recordFamilyOutcome } from './familylessons.js';
 import { getStory, storyOutcome } from './stories.js';
 import { convertPinyin } from './pinyinime.js';
 import { synthesize } from './tts.js';
-import { transcribe, sttAvailable } from './stt.js';
+import { transcribe, sttAvailable, sttEngine } from './stt.js';
 import { spendSummary } from './spend.js';
+import { requireAccess, accessRequired, checkAccess } from './auth.js';
 
 initSchema();
 const app = express();
@@ -58,6 +59,15 @@ const wrap = (fn) => (req, res) => {
 };
 
 app.get('/api/health', (req, res) => res.json({ ok: true, hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY) }));
+
+// The access gate (hosted instances only; inert when APP_PASSWORD is unset).
+// Declared before the guard so the client can discover whether a gate exists and
+// verify a passphrase without already holding one.
+app.get('/api/auth/check', (req, res) => res.json({
+  required: accessRequired(),
+  ok: !accessRequired() || checkAccess(req.get('x-access')),
+}));
+app.use('/api', requireAccess);
 
 // Serving the app itself. In dev, Vite serves it on :5173 and proxies /api here. For
 // SHARING (Cloudflare tunnel), it's simpler to expose ONE port: if a production build
@@ -270,10 +280,10 @@ app.post('/api/prefs', wrap((req, res) => {
 app.get('/api/spend', wrap(async (req, res) => res.json(await spendSummary())));
 
 // ── Local Whisper STT ───────────────────────────────────────────────────────
-app.get('/api/stt/health', (req, res) => res.json({ available: sttAvailable() }));
+app.get('/api/stt/health', (req, res) => res.json({ available: sttAvailable(), engine: sttEngine() }));
 app.post('/api/stt', express.raw({ type: () => true, limit: '15mb' }), wrap(async (req, res) => {
   const hint = String(req.query.hint || '');
-  res.json(await transcribe(req.body, { hint }));
+  res.json(await transcribe(req.body, { hint, mime: req.get('content-type') || '' }));
 }));
 
 // ── Neural TTS (Edge voices, cached mp3) ────────────────────────────────────
