@@ -75,3 +75,74 @@ meet-before-use, 20-turn decodability, never-strand, rung knobs), `test/nofabric
 
 `TODO(ladder:)` — richer frame library per capability; rung-1 hybrid Qwen rephrase within
 frames; smoother rung-transition telemetry.
+
+---
+
+## 2026-08-12 — the ARC, semantic frames, and an ending
+
+Three related problems showed up in real use: a guided session talked about the same
+one or two nouns for its whole length, some of what it said was nonsense ("how many
+senior high schools do you have?", "how many suns do you have?"), and it never
+really *finished* — it stopped when a turn counter ran out.
+
+None of it was Qwen. At rungs 0/1 the model is not called at all: those turns are
+built from `vocabguard` frames. The three causes were structural.
+
+**1. Frames now have SEMANTICS (`vocabguard.js`).** Every noun gets a coarse
+`nounCategory()` — object / creature / person / food / drink / place / nature /
+plant / body — derived from the curated emoji-keyword map plus gloss keywords. Every
+frame declares which categories it `fits`. Places get 去/在 frames, weather gets
+今天有…吗, food gets 喜欢吃, and 有/几个 is restricted to things you can actually own
+and count. `pickFrame` also excludes frames the session already used, so a word is
+never asked about the same way twice.
+Rung 0's core whitelist gained the everyday HSK-1 verbs (喜欢/在/去/吃/喝/看/想) —
+without them rung 0 could only say 是/有/几个, which is what forced the repetition.
+
+**2. A session is an ARC, not a carousel (`converse.js`).**
+`meet → identify → relate → grow → use → combine → win → farewell`. The `grow` beat
+introduces a NEW word mid-conversation (graph-connected, not a synonym and not
+sharing a character with anything in play — `tooSimilar`), so the talk travels. A
+detour (confusion, "how do I say…", English meta) does not consume a beat, but three
+in a row advances anyway, so nobody gets stuck. **The arc reaching its end IS the
+ending** — that is what makes the close feel earned rather than abrupt.
+
+**3. Endings are guaranteed, and the learner can ask for one.**
+- Guided: the `farewell` beat names what was actually met today and leaves one
+  concrete thread for next time. Deterministic — no model needed.
+- Free (rung 2): the final line is built in CODE (`freeFallbackTurn`/`freeFarewell`),
+  not requested from the model, which used to answer "close for real" by opening a new
+  topic. Plus a hard `FREE_CEILING` independent of the blueprint budget.
+- Both: `forceWrap` on `/api/conversation/turn` — the "聊到这儿 · wrap up" button.
+
+**Anti-fixation at the free rung.** What the teacher has already been about is tracked
+per conversation (`topics:<id>`) and fed back as a "do not re-litigate these" directive
+plus one adjacent concept from the graph. Exactly ONE regeneration slot per turn covers
+both this and the comprehensible-input repair — stacking two retries is how a turn
+ended up taking three minutes on a local model.
+
+**Word/gloss quality.** `namableGloss` rejects dictionary definitions posing as words
+("house with more than 1"), and `cleanShort` now picks the sense a LEARNER wants rather
+than the first one CEDICT lists (城 → city, not "city walls"; 猪 → pig, not "hog").
+
+**Backend robustness (`qwen.js`).** An empty completion is now treated as a failure and
+falls through to the next backend instead of reaching the UI as a blank bubble. Ollama
+gets `num_ctx` (its 4096 default truncated the executor prompt); OpenRouter is bounded
+by a timeout, asks for `reasoning.exclude`, and reads `reasoning` if a thinking model
+still answers there.
+
+## The entrance exam (`server/placement.js`, `src/pages/Placement.jsx`)
+Optional and skippable. It runs through the conversation surface — teacher bubbles,
+interlinear grounding, tap-to-answer chips — escalating through six levels
+(recognize → frame comprehension → sentence comprehension → open production) and
+stopping after two consecutive misses, so nobody is marched through questions they
+can't read. Probes are generated from real content (word/sentence tables + the same
+frames the guided rung speaks), never a hand-written syllabus, and the answer key is
+never serialized to the client. The result sets `rung_state`, seeds the level
+estimates the planner reads, and marks the path already behind the learner —
+replacing onboarding's old "how many units do you already know?" self-report.
+Skipping is a first-class outcome: rung 0, nothing lost. `test/placement.test.js`.
+
+## Home (`src/pages/Home.jsx`)
+Two forward tracks — 说 Speak and 读 Read — each phrased as the next thing to do, with
+the words a session will pick back up from. The numbered unit path is gone: showing a
+ladder of levels made the first thing you saw every day be how far you still had to go.

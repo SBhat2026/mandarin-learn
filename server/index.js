@@ -3,10 +3,11 @@ import express from 'express';
 import cors from 'cors';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { db, initSchema, MEDIA_DIR, getSetting, setSetting, runAsUser, currentUserSlug, ROOT } from './db.js';
+import { db, initSchema, MEDIA_DIR, getSetting, setSetting, getModel, runAsUser, currentUserSlug, ROOT } from './db.js';
+import { cleanGloss } from './exercises.js';
 import { listUsers, addUser, getUser, primarySlug, setUserPref } from './users.js';
 import { aiRateLimit } from './ratelimit.js';
-import { buildSession, buildLesson, submitReview, currentUnit, unitProgress } from './session.js';
+import { buildSession, buildLesson, submitReview } from './session.js';
 import { inferTraits, recordChannelSignal } from './learner.js';
 import { imageFor } from './images.js';
 import { recordChoiceOutcome } from './rung.js';
@@ -23,6 +24,7 @@ import { lookup } from './dictionary.js';
 import { passages } from './reading.js';
 import { buildToneDrill, toneStats, weakTone } from './tone.js';
 import { saveOnboarding, onboardingState } from './onboarding.js';
+import { placementState, startPlacement, answerPlacement, skipPlacement } from './placement.js';
 import { claudeModelPref, setClaudeModelPref, richModelAvailable } from './anthropic.js';
 import { TOPICS } from './taxonomy.js';
 import { State } from './fsrs.js';
@@ -94,16 +96,54 @@ app.get('/api/meta', (req, res) => res.json({
   onboarding: onboardingState(),
 }));
 
-// ---- Home: unit path, counts, streak ----
+// ---- Home: two forward tracks (speak / read), not a ladder of levels ----
+// The old payload was a numbered unit path, which made the home screen a picture of
+// how far you still had to go. This one answers a different question: what is the
+// next thing to do, on each of the two tracks, right now.
+const STORY_MIN_WORDS = 8;                 // stories.js floor for having anything to build from
+
 app.get('/api/home', wrap((req, res) => {
-  const units = db().prepare('SELECT * FROM units ORDER BY position').all().map(u => {
-    const prog = unitProgress(u);
-    return { id: u.id, position: u.position, name: u.name, topic: u.topic,
-             wordCount: JSON.parse(u.word_ids || '[]').length, progress: prog, completed: prog.ratio >= 0.8 };
-  });
-  const cur = currentUnit();
   const dueNow = db().prepare(`SELECT COUNT(*) c FROM cards WHERE state>0 AND suspended=0 AND due<=datetime('now')`).get().c;
-  res.json({ units, currentUnitId: cur?.id ?? null, dueNow, streak: streak(), onboarding: onboardingState() });
+  const known = knownWordIds().size;
+  const met = db().prepare(`SELECT COUNT(DISTINCT item_id) c FROM cards WHERE item_type='word'`).get().c;
+  const lastConversation = db().prepare(
+    `SELECT updated FROM conversation_sessions ORDER BY updated DESC LIMIT 1`).get()?.updated || null;
+
+  // What the speaking track picks up from — the honest callback the guided rung
+  // itself uses, so the home screen and the teacher agree.
+  const lastWords = (getModel('last_session_words', []) || []).slice(0, 3)
+    .map(h => db().prepare('SELECT hanzi, pinyin, gloss, english FROM words WHERE hanzi=?').get(h))
+    .filter(Boolean)
+    .map(w => ({ hanzi: w.hanzi, pinyin: w.pinyin || '', gloss: cleanGloss(w) }));
+
+  // Reading unlocks on CONTENT words the learner has actually met. stories.js can
+  // technically build from the core function words alone, but a story made of 是/的
+  // is not a reading experience — so the track opens once there is something to
+  // read about.
+  const readReady = met >= STORY_MIN_WORDS;
+  const story = getModel('current_story', null);
+
+  res.json({
+    dueNow,
+    streak: streak(),
+    progress: { known, met },
+    speak: {
+      started: !!lastConversation,
+      lastAt: lastConversation,
+      pickUpFrom: lastWords,
+      label: lastConversation ? 'Pick up where you left off' : 'Start your first conversation',
+    },
+    read: {
+      ready: readReady,
+      wordsToUnlock: Math.max(0, STORY_MIN_WORDS - met),
+      hasStory: !!story && !story.completed,
+      title: story && !story.completed ? story.title : null,
+      label: !readReady ? 'Unlocks once you have met a few words'
+        : story && !story.completed ? 'Continue your story' : 'A new story at your level',
+    },
+    placement: placementState(),
+    onboarding: onboardingState(),
+  });
 }));
 
 function streak() {
@@ -147,10 +187,13 @@ app.get('/api/conversation/plan', wrap(async (req, res) => res.json(await startC
 
 // One executor turn: advances the hidden stage, may attach an inline rep or a framed
 // excursion, and signals shouldWrap when completion conditions fire (Workstream F).
+// `forceWrap` is the learner asking to finish ("wrap up" in the UI): the teacher
+// moves straight to its closing beat and says goodbye properly instead of the
+// learner having to abandon the page.
 app.post('/api/conversation/turn', aiRateLimit, wrap(async (req, res) => {
-  const { sessionId, history = [], userText = '', shouldWrap = false } = req.body || {};
+  const { sessionId, history = [], userText = '', shouldWrap = false, forceWrap = false } = req.body || {};
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
-  res.json(await conversationTurn({ id: sessionId, history, userText, shouldWrap }));
+  res.json(await conversationTurn({ id: sessionId, history, userText, shouldWrap, forceWrap }));
 }));
 
 // Finish: extended post-hoc inference (understanding, capability demos, profile
@@ -319,6 +362,18 @@ app.get('/api/tone', wrap((req, res) => {
   const drill = buildToneDrill(weak?.pair, Number(req.query.max) || 10);
   res.json({ stats, weak, drill });
 }));
+
+// ---- Entrance exam (placement) ----
+// Optional and skippable. Running it seeds the rung + level estimates so the first
+// conversation already speaks at the right level; skipping starts at the beginning.
+app.get('/api/placement', wrap((req, res) => res.json(placementState())));
+app.post('/api/placement/start', wrap((req, res) => res.json(startPlacement())));
+app.post('/api/placement/answer', wrap((req, res) => {
+  const r = answerPlacement({ answer: req.body?.answer ?? '' });
+  if (r.error) return res.status(400).json(r);
+  res.json(r);
+}));
+app.post('/api/placement/skip', wrap((req, res) => res.json(skipPlacement())));
 
 // ---- Onboarding / settings ----
 app.get('/api/onboarding', wrap((req, res) => res.json(onboardingState())));

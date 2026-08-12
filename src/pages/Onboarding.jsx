@@ -6,8 +6,7 @@ import { spokenCaptureSupported, captureSpoken, ttsSupported, speak } from '../l
 export default function Onboarding({ onDone }) {
   const [meta, setMeta] = useState(null);
   const [topics, setTopics] = useState([]);
-  const [level, setLevel] = useState('beginner');
-  const [knownUnits, setKnownUnits] = useState(3);
+  const [level, setLevel] = useState('exam');   // measuring beats self-reporting
   const [mic, setMic] = useState(null);
   const [saving, setSaving] = useState(false);
   const navigate = useNavigate();
@@ -31,13 +30,12 @@ export default function Onboarding({ onDone }) {
 
   async function finish() {
     setSaving(true);
-    await api.saveOnboarding({
-      interestTopics: topics,
-      knownUnits: level === 'some' ? Number(knownUnits) : 0,
-      micWorks: mic === 'ok',
-    });
+    // Interests and mic are saved either way; the STARTING POSITION is set by the
+    // exam (or by skipping it), never by this form.
+    await api.saveOnboarding({ interestTopics: topics, knownUnits: 0, micWorks: mic === 'ok' });
+    if (level !== 'exam') await api.placementSkip().catch(() => {});
     onDone?.();
-    navigate('/');
+    navigate(level === 'exam' ? '/placement' : '/');
   }
 
   return (
@@ -75,28 +73,27 @@ export default function Onboarding({ onDone }) {
         </div>
       </Step>
 
-      <Step n="3" title="Where do you start?">
+      {/* Step 3 used to ask the learner to self-report how many units they already
+          knew — a question nobody can answer accurately about a language. The
+          entrance exam measures it instead, in about a minute, and skipping it is a
+          real option rather than a worse one. */}
+      <Step n="3" title="Where do you start?" hint="Laoshi can find this out in about a minute — or just start from the beginning.">
         <div className="space-y-2.5">
-          <Radio checked={level === 'beginner'} onChange={() => setLevel('beginner')} label="True beginner — start at Unit 1" />
-          <Radio checked={level === 'some'} onChange={() => setLevel('some')} label="I know some — mark early units as known" />
-          {level === 'some' && (
-            <div className="pl-7 text-sm text-ink-soft flex items-center gap-1.5">
-              Mark first
-              <input type="number" min="1" max={meta.counts.units} value={knownUnits}
-                onChange={e => setKnownUnits(e.target.value)}
-                className="w-16 px-2 py-1 rounded-lg border border-line bg-white text-center" />
-              units’ words as known.
-            </div>
-          )}
+          <Radio checked={level === 'exam'} onChange={() => setLevel('exam')}
+            label="Find out — a quick check with Laoshi" />
+          <Radio checked={level === 'beginner'} onChange={() => setLevel('beginner')}
+            label="Start me at the very beginning" />
         </div>
       </Step>
 
       <div className="flex items-center gap-4 mt-2">
         <button onClick={finish} disabled={topics.length === 0 || saving}
           className="px-7 py-3 rounded-2xl bg-ink text-white font-medium shadow-soft hover:shadow-lift transition disabled:opacity-40">
-          {saving ? 'Building your path…' : 'Start learning →'}
+          {saving ? 'Building your path…' : level === 'exam' ? 'Take the quick check →' : 'Start learning →'}
         </button>
-        <span className="text-[12px] text-ink-faint">Your topics reshape the unit order automatically.</span>
+        <span className="text-[12px] text-ink-faint">
+          {level === 'exam' ? 'No score — it just finds your starting point.' : 'The app speeds up on its own as soon as you show you can go faster.'}
+        </span>
       </div>
     </div>
   );

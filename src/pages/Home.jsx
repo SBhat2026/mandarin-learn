@@ -1,59 +1,152 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api.js';
+import { TonedPinyin } from '../components/Toned.jsx';
 
+// Home is a DOOR, not a map. It used to show a numbered path of units, which meant
+// the first thing you saw every day was how far you still had to go. Now it shows
+// exactly two ways forward — speaking and reading — each phrased as the next thing
+// to do, with progress expressed as what you can already do rather than as a
+// position on a ladder.
 export default function Home() {
   const [data, setData] = useState(null);
   const navigate = useNavigate();
-  const currentRef = useRef(null);
 
   useEffect(() => { api.home().then(setData).catch(e => setData({ error: e.message })); }, []);
-  useEffect(() => {
-    if (data && currentRef.current) currentRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }, [data]);
 
   if (!data) return <Loading />;
   if (data.error) return <ErrorNote msg={data.error} />;
 
-  const { units, currentUnitId, dueNow, streak } = data;
-  const current = units.find(u => u.id === currentUnitId);
-  const learned = units.reduce((n, u) => n + (u.progress?.review || 0), 0);
+  const { speak, read, progress, dueNow, streak, placement } = data;
+  const offerExam = placement && !placement.taken;
 
   return (
     <div className="animate-rise">
-      {/* Hero */}
-      <section className="mb-10">
-        <div className="text-[13px] font-medium text-ink-faint mb-1">Welcome back</div>
-        <h1 className="text-3xl font-semibold tracking-tightish mb-6">
-          {current ? current.name : 'Your path'}
-        </h1>
-        <div className="flex items-stretch gap-3">
-          <Metric value={dueNow} label="Due today" primary />
-          <Metric value={learned} label="Words learned" />
-          <Metric value={`${streak}`} label="Day streak" suffix={streak > 0 ? '🔥' : ''} />
-          <button onClick={() => navigate('/converse')}
-            className="ml-auto self-stretch px-6 rounded-2xl bg-ink text-white font-medium shadow-soft
-                       hover:shadow-lift transition-shadow flex items-center gap-2">
-            <span className="hanzi">跟老师聊聊</span> <span aria-hidden>→</span>
-          </button>
+      {offerExam && <ExamOffer onTake={() => navigate('/placement')} />}
+
+      <section className="mb-7">
+        <div className="text-[13px] font-medium text-ink-faint mb-1">
+          {speak?.started ? 'Welcome back' : 'Welcome'}
         </div>
+        <h1 className="text-3xl font-semibold tracking-tightish">
+          {speak?.started ? '继续' : '开始吧'}
+          <span className="text-ink-faint text-xl font-normal ml-3">
+            {speak?.started ? 'keep going' : "let's begin"}
+          </span>
+        </h1>
       </section>
 
-      <TodayControls />
-
-      {/* Path */}
-      {units.length === 0 && <p className="text-ink-soft">No units yet — run the ingest pipeline.</p>}
-      <div className="relative pl-1">
-        <div className="absolute left-[27px] top-4 bottom-4 w-px bg-line" aria-hidden />
-        <ol className="space-y-2.5">
-          {units.map(u => (
-            <PathNode key={u.id} unit={u} current={u.id === currentUnitId}
-              refEl={u.id === currentUnitId ? currentRef : null}
-              onClick={() => u.id === currentUnitId && navigate('/converse')} />
-          ))}
-        </ol>
+      {/* The two tracks. Speaking leads — it is the point of the app. */}
+      <div className="space-y-3 mb-8">
+        <TrackCard
+          primary
+          hanzi="说" latin="Speak"
+          title={speak?.label}
+          onClick={() => navigate('/converse')}
+          cta={speak?.started ? '继续聊' : '跟老师聊聊'}
+          detail={
+            speak?.pickUpFrom?.length
+              ? <WordThread words={speak.pickUpFrom} />
+              : <span className="text-[13px] text-ink-faint">Laoshi will introduce a few words and talk with you about them.</span>
+          }
+        />
+        <TrackCard
+          hanzi="读" latin="Read"
+          title={read?.label}
+          disabled={!read?.ready}
+          onClick={() => read?.ready && navigate('/reading')}
+          cta={read?.hasStory ? '接着读' : '读一读'}
+          detail={
+            read?.ready
+              ? (read.title
+                  ? <span className="text-[13px] text-ink-soft"><span className="hanzi text-[15px] mr-2">{read.title.hanzi}</span>{read.title.english}</span>
+                  : <span className="text-[13px] text-ink-faint">A short story written from the words you know.</span>)
+              : <span className="text-[13px] text-ink-faint">Meet a few more words in conversation and a story appears here.</span>
+          }
+        />
       </div>
+
+      {/* One quiet line of state. No levels, no percentage-to-next-tier. */}
+      <div className="flex items-center gap-5 text-[12px] text-ink-faint mb-8 px-1">
+        <span><b className="text-ink text-[13px]">{progress?.known ?? 0}</b> words you can use</span>
+        <span><b className="text-ink text-[13px]">{progress?.met ?? 0}</b> met so far</span>
+        {dueNow > 0 && <span><b className="text-ink text-[13px]">{dueNow}</b> ready to revisit</span>}
+        {streak > 0 && <span><b className="text-ink text-[13px]">{streak}</b> day streak 🔥</span>}
+      </div>
+
+      <TodayControls />
     </div>
+  );
+}
+
+// A one-time, dismissible-by-doing offer. Deliberately not a wall: the app is fully
+// usable without ever taking it.
+function ExamOffer({ onTake }) {
+  const [busy, setBusy] = useState(false);
+  async function skip() {
+    if (busy) return;
+    setBusy(true);
+    try { await api.placementSkip(); window.location.reload(); } catch { setBusy(false); }
+  }
+  return (
+    <section className="mb-7 card-face p-5 border-jade-200 bg-jade-50/40">
+      <div className="text-[13px] font-medium text-ink mb-1">Have you studied Chinese before?</div>
+      <p className="text-[13px] text-ink-soft mb-3.5">
+        A one-minute chat with Laoshi finds where to start you. Or skip it and start from the beginning —
+        the app works either way and adjusts as you go.
+      </p>
+      <div className="flex items-center gap-2">
+        <button onClick={onTake}
+          className="px-4 py-2 rounded-full bg-ink text-white text-[13px] font-medium hover:opacity-90 transition">
+          Take the quick check →
+        </button>
+        <button onClick={skip} disabled={busy}
+          className="px-4 py-2 rounded-full border border-line bg-white text-[13px] text-ink-soft hover:border-ink/30 transition disabled:opacity-50">
+          {busy ? 'Setting up…' : 'Start from the beginning'}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+// The words a session will pick back up from — concrete evidence that yesterday
+// happened, which is what "continue" should mean.
+function WordThread({ words }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {words.map((w, i) => (
+        <span key={i} className="inline-flex items-baseline gap-1.5 px-2.5 py-1 rounded-full bg-white/80 border border-line">
+          <span className="hanzi text-[15px] text-ink">{w.hanzi}</span>
+          <span className="text-[11px] text-jade-700"><TonedPinyin pinyin={w.pinyin} /></span>
+          <span className="text-[11px] text-ink-faint">{w.gloss}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function TrackCard({ hanzi, latin, title, detail, cta, onClick, primary, disabled }) {
+  return (
+    <button onClick={onClick} disabled={disabled}
+      className={`w-full text-left rounded-3xl border p-5 transition group ${
+        disabled ? 'bg-white/40 border-line/70 cursor-default'
+          : primary ? 'bg-white border-ink/15 shadow-soft hover:shadow-lift'
+          : 'bg-white border-line hover:border-ink/25 hover:shadow-soft'}`}>
+      <div className="flex items-center gap-4">
+        <span className={`hanzi text-3xl leading-none w-12 shrink-0 ${disabled ? 'text-ink-faint' : 'text-ink'}`}>{hanzi}</span>
+        <div className="min-w-0 flex-1">
+          <div className="text-[11px] uppercase tracking-[0.12em] text-ink-faint mb-0.5">{latin}</div>
+          <div className={`font-medium mb-1.5 ${disabled ? 'text-ink-soft' : 'text-ink'}`}>{title}</div>
+          {detail}
+        </div>
+        {!disabled && (
+          <span className={`shrink-0 px-4 py-2 rounded-full text-[13px] font-medium transition ${
+            primary ? 'bg-ink text-white' : 'border border-line text-ink-soft group-hover:border-ink/30'}`}>
+            <span className="hanzi">{cta}</span> →
+          </span>
+        )}
+      </div>
+    </button>
   );
 }
 
@@ -131,58 +224,6 @@ function TodayControls() {
         </div>
       )}
     </section>
-  );
-}
-
-function PathNode({ unit, current, onClick, refEl }) {
-  const pct = Math.round((unit.progress?.ratio || 0) * 100);
-  const started = pct > 0 || current;
-  return (
-    <li ref={refEl} className="relative flex items-center gap-4">
-      {/* node dot */}
-      <div className={`relative z-10 shrink-0 w-[54px] flex justify-center`}>
-        <span className={`grid place-items-center w-9 h-9 rounded-full text-[13px] font-semibold border
-          ${unit.completed ? 'bg-jade-500 border-jade-500 text-white'
-            : current ? 'bg-white border-ink text-ink ring-4 ring-jade-100'
-            : started ? 'bg-white border-line text-ink-soft'
-            : 'bg-[#f4f2ee] border-line text-ink-faint'}`}>
-          {unit.completed ? '✓' : unit.position}
-        </span>
-      </div>
-      <button onClick={onClick} disabled={!current}
-        className={`flex-1 text-left px-4 py-3 rounded-2xl border transition
-          ${current ? 'bg-white border-ink/15 shadow-soft hover:shadow-lift cursor-pointer'
-            : unit.completed ? 'bg-white/70 border-line'
-            : 'bg-white/40 border-line/70'}`}>
-        <div className="flex items-center justify-between">
-          <div>
-            <div className={`font-medium ${started ? 'text-ink' : 'text-ink-soft'}`}>{unit.name}</div>
-            <div className="text-[12px] text-ink-faint capitalize">{unit.topic} · {unit.wordCount} words</div>
-          </div>
-          <div className="text-right">
-            {current && <span className="text-[11px] font-medium text-jade-600">Continue</span>}
-            {unit.completed && <span className="text-[11px] text-jade-600">Complete</span>}
-            <div className="text-[12px] text-ink-faint mt-0.5">{unit.progress?.review || 0}/{unit.progress?.total || 0}</div>
-          </div>
-        </div>
-        {started && (
-          <div className="mt-2.5 h-1 rounded-full bg-[#f0ede8] overflow-hidden">
-            <div className="h-full bg-jade-400 transition-all" style={{ width: pct + '%' }} />
-          </div>
-        )}
-      </button>
-    </li>
-  );
-}
-
-function Metric({ value, label, primary, suffix }) {
-  return (
-    <div className={`px-5 py-3 rounded-2xl border ${primary ? 'bg-ink text-white border-ink' : 'bg-white border-line'}`}>
-      <div className={`text-2xl font-semibold leading-none ${primary ? 'text-white' : 'text-ink'}`}>
-        {value}{suffix ? <span className="text-base ml-0.5">{suffix}</span> : null}
-      </div>
-      <div className={`text-[11px] mt-1.5 ${primary ? 'text-white/70' : 'text-ink-faint'}`}>{label}</div>
-    </div>
   );
 }
 

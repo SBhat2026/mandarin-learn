@@ -13,6 +13,7 @@
     "preview": "vite preview",
     "db:init": "node scripts/init-db.js",
     "db:reset": "node scripts/reset-db.js",
+    "reset:progress": "node scripts/reset-progress.js",
     "migrate": "node scripts/migrate.js",
     "seed:capabilities": "node ingest/seed-capabilities.js",
     "dump:plan": "node scripts/dump-plan.js",

@@ -7,6 +7,7 @@ import ToneTrainer from './pages/ToneTrainer.jsx';
 import Reading from './pages/Reading.jsx';
 import Stats from './pages/Stats.jsx';
 import Onboarding from './pages/Onboarding.jsx';
+import Placement from './pages/Placement.jsx';
 import SettingsGear from './components/SettingsGear.jsx';
 import Login from './components/Login.jsx';
 import UserChip from './components/UserChip.jsx';
@@ -53,7 +54,8 @@ export default function App() {
 
   if (!user) return <Login onPick={setUser} />;
 
-  const onOnboarding = loc.pathname === '/onboarding';
+  // Onboarding and the entrance exam are full-screen moments — no nav chrome.
+  const onOnboarding = loc.pathname === '/onboarding' || loc.pathname === '/placement';
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -104,6 +106,7 @@ export default function App() {
             <Route path="/tones" element={<ToneTrainer />} />
             <Route path="/reading" element={<Reading />} />
             <Route path="/stats" element={<Stats />} />
+            <Route path="/placement" element={<Placement />} />
             <Route path="/onboarding" element={<Onboarding onDone={() => api.meta().then(setMeta)} />} />
           </Routes>
         </div>

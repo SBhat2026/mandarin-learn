@@ -86,6 +86,10 @@ export const api = STATIC ? {
   tone: () => demo('tone.json'),
   onboarding: () => Promise.resolve({ onboarded: true }),
   saveOnboarding: async () => ({ ok: true, demo: true }),
+  placement: async () => ({ taken: true, result: null }),   // demo: never offer the exam
+  placementStart: async () => ({ probe: null }),
+  placementAnswer: async () => ({ done: true, result: null }),
+  placementSkip: async () => ({ done: true, skipped: true, result: null }),
   modelSettings: () => Promise.resolve({ pref: 'fast', richAvailable: false, hasApiKey: false }),
   setModelPref: async (pref) => ({ pref, richAvailable: false }),
   users: () => Promise.resolve({ users: [{ slug: 'me', displayName: 'Demo', primary: true }], current: 'me', primary: 'me' }),
@@ -110,6 +114,8 @@ export const api = STATIC ? {
   lessonTurn: (body) => req('/api/lesson/turn', { method: 'POST', body: JSON.stringify(body) }),
   lessonComplete: (body) => req('/api/lesson/complete', { method: 'POST', body: JSON.stringify(body) }),
   conversationPlan: () => req('/api/conversation/plan'),
+  // body: { sessionId, history, userText, forceWrap? } — forceWrap asks the teacher
+  // to close the conversation properly instead of the learner just walking away.
   conversationTurn: (body) => req('/api/conversation/turn', { method: 'POST', body: JSON.stringify(body) }),
   conversationComplete: (body) => req('/api/conversation/complete', { method: 'POST', body: JSON.stringify(body) }),
   pronObserve: (body) => req('/api/pron/observe', { method: 'POST', body: JSON.stringify(body) }),
@@ -124,6 +130,10 @@ export const api = STATIC ? {
   tone: (max = 10) => req('/api/tone?max=' + max),
   onboarding: () => req('/api/onboarding'),
   saveOnboarding: (body) => req('/api/onboarding', { method: 'POST', body: JSON.stringify(body) }),
+  placement: () => req('/api/placement'),
+  placementStart: () => req('/api/placement/start', { method: 'POST', body: '{}' }),
+  placementAnswer: (answer) => req('/api/placement/answer', { method: 'POST', body: JSON.stringify({ answer }) }),
+  placementSkip: () => req('/api/placement/skip', { method: 'POST', body: '{}' }),
   modelSettings: () => req('/api/settings/model'),
   setModelPref: (pref) => req('/api/settings/model', { method: 'POST', body: JSON.stringify({ pref }) }),
   users: () => req('/api/users'),

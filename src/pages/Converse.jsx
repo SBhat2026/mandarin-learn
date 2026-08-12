@@ -26,6 +26,9 @@ export default function Converse({ onFallback }) {
   const scroller = useRef(null);
   const opened = useRef(false);
   const pendingSpoken = useRef(null);
+  const finished = useRef(false);
+  const itemsRef = useRef(items);
+  const sessionRef = useRef(null);
   const sessionId = session?.sessionId;
   const scriptMode = scriptModeFromLevel(session?.scriptLevel, session?.scriptPref);
   const canSpeak = spokenCaptureSupported();
@@ -38,6 +41,14 @@ export default function Converse({ onFallback }) {
       .catch(() => onFallback?.());
   }, []);
   useEffect(() => { scroller.current?.scrollTo(0, scroller.current.scrollHeight); }, [items, busy]);
+  useEffect(() => { itemsRef.current = items; }, [items]);
+  useEffect(() => { sessionRef.current = sessionId; }, [sessionId]);
+  // Leaving mid-conversation (including during the goodbye) must still record what
+  // was learned — otherwise the two-beat close could silently drop a whole session.
+  useEffect(() => () => {
+    if (finished.current || !sessionRef.current) return;
+    if (itemsRef.current.some(i => i.role === 'user')) finish(sessionRef.current, 'abandoned');
+  }, []);
 
   function historyFor() {
     return items.filter(i => i.role === 'user' || i.role === 'assistant')
@@ -50,10 +61,18 @@ export default function Converse({ onFallback }) {
     api.signalChannel('reveal_text').catch(() => {});
   }
 
-  async function turn(text, opening = false, spoken = null, sid = sessionId, tapped = false) {
+  // Ask Laoshi to finish. The teacher delivers a real goodbye (referring back to
+  // something from this conversation) instead of the learner having to abandon the
+  // page mid-sentence.
+  function wrapUp() {
+    if (busy || done || !sessionId) return;
+    turn('', false, null, sessionId, false, true);
+  }
+
+  async function turn(text, opening = false, spoken = null, sid = sessionId, tapped = false, forceWrap = false) {
     if (busy || !sid) return;
     const history = historyFor();
-    if (!opening) {
+    if (!opening && !forceWrap) {
       const last = items[items.length - 1];
       const lastIdx = items.length - 1;
       if (last?.role === 'assistant' && last.audioFirst && !revealed[lastIdx]) api.signalChannel('kept_audio').catch(() => {});
@@ -62,7 +81,7 @@ export default function Converse({ onFallback }) {
     }
     setInput(''); pendingSpoken.current = null; setBusy(true);
     try {
-      const reply = await api.conversationTurn({ sessionId: sid, history, userText: opening ? '' : text });
+      const reply = await api.conversationTurn({ sessionId: sid, history, userText: (opening || forceWrap) ? '' : text, forceWrap });
       if (!reply.hanzi && reply.english?.includes('backend')) { onFallback?.(); return; }
       setItems(prev => {
         const next = [...prev, {
@@ -79,6 +98,8 @@ export default function Converse({ onFallback }) {
       const say = reply.followFrame?.hanzi || reply.hanzi;
       if (say) setTimeout(() => speak(say), reply.intro?.hanzi ? 900 : 0);
       if (reply.excursion) setExcursion(reply.excursion);
+      // `closing` is the first beat of the goodbye — the learner still gets to
+      // reply. Only `shouldWrap` (the second beat) actually ends the conversation.
       if (reply.shouldWrap) finish(sid, reply.wrapReason);
     } catch { onFallback?.(); } finally { setBusy(false); }
   }
@@ -100,8 +121,10 @@ export default function Converse({ onFallback }) {
   }
 
   function finish(sid = sessionId, endedReason = null) {
+    if (finished.current) return;      // scheduling must run exactly once
+    finished.current = true;
     setDone(true);
-    const transcript = items.filter(i => i.role === 'user' || i.role === 'assistant');
+    const transcript = itemsRef.current.filter(i => i.role === 'user' || i.role === 'assistant');
     api.conversationComplete({ sessionId: sid, transcript, endedReason }).catch(() => {});
   }
 
@@ -193,10 +216,17 @@ export default function Converse({ onFallback }) {
       ) : (
         <div className="mt-3">
           {listening && <div className="text-center text-sm text-rose-500 mb-2 animate-pulse">Listening… speak now</div>}
-          <button type="button" onClick={() => { setInput('How do I say '); inputRef.current?.focus(); }}
-            className="mb-2 text-[12px] text-ink-soft hover:text-ink border border-line rounded-full px-3 py-1 bg-white/70">
-            💬 Help me say something…
-          </button>
+          <div className="mb-2 flex items-center gap-2">
+            <button type="button" onClick={() => { setInput('How do I say '); inputRef.current?.focus(); }}
+              className="text-[12px] text-ink-soft hover:text-ink border border-line rounded-full px-3 py-1 bg-white/70">
+              💬 Help me say something…
+            </button>
+            <button type="button" onClick={wrapUp} disabled={busy}
+              className="ml-auto text-[12px] text-ink-faint hover:text-ink border border-line rounded-full px-3 py-1 bg-white/70 disabled:opacity-40"
+              title="Finish the conversation">
+              聊到这儿 · wrap up
+            </button>
+          </div>
           {ime?.ok && ime.hanzi && (
             <button type="button" onClick={acceptIme}
               className="mb-2 ml-2 flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-jade-50 border border-jade-200 hover:border-jade-400 transition">

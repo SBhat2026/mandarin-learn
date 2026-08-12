@@ -40,6 +40,12 @@ const EMOJI = [
   ['music', '🎵'], ['ball', '⚽'], ['gift', '🎁'], ['sky', '🌌'], ['road', '🛣️'], ['city', '🏙️'],
 ];
 
+// The emoji keys double as a curated list of EVERYDAY CONCEPTS — the meanings a
+// beginner actually needs. vocabguard uses it to choose which dictionary sense to
+// show ("hog; pig; swine" → pig), so glosses read like words instead of like a
+// nineteenth-century dictionary.
+export const EVERYDAY_KEYWORDS = new Set(EMOJI.map(([kw]) => kw));
+
 function emojiFor(text) {
   const s = ` ${String(text || '').toLowerCase().replace(/[^a-z\s]/g, ' ')} `;
   let best = null;
