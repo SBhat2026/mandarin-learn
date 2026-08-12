@@ -18,6 +18,7 @@ import { scriptLevel, updateMastery } from './learner.js';
 import { getInterests } from './interests.js';
 import { pinyinForHanzi, glossForHanzi } from './pronunciation.js';
 import { segment, validateTurn } from './vocabguard.js';
+import { knownCharacters, orthographicYield, charCoverage, readabilityBand } from './orthography.js';
 import { createCardsForWord } from './cards.js';
 import { cleanGloss } from './exercises.js';
 import { storyThrottle } from './spend.js';
@@ -47,11 +48,24 @@ function knownRows(limit = 500) {
 
 // Up to `n` stretch words: the planner's best next candidates (comprehensible,
 // graph-connected, interest-aware) — these are the story's i+1.
+//
+// Among candidates the planner considers roughly equivalent, prefer the one that
+// pays ORTHOGRAPHICALLY: a word carrying the key to a consistent phonetic series
+// makes a whole family of unmet characters guessable, while an equally frequent
+// isolated character buys exactly one. The planner's ranking still dominates (the
+// word must be comprehensible first), so this only breaks near-ties.
 function stretchWords(n = 3) {
-  return newCandidates(n, undefined).map(c => {
+  const known = knownCharacters();
+  const pool = newCandidates(n * 3, undefined).map((c, rank) => {
     const w = db().prepare('SELECT id, hanzi, pinyin, gloss, english FROM words WHERE id=?').get(c.id);
-    return w && { wordId: w.id, hanzi: w.hanzi, pinyin: w.pinyin || pinyinForHanzi(w.hanzi), gloss: cleanGloss(w) };
+    if (!w) return null;
+    return {
+      wordId: w.id, hanzi: w.hanzi, pinyin: w.pinyin || pinyinForHanzi(w.hanzi), gloss: cleanGloss(w),
+      _score: orthographicYield(w.hanzi, known) - rank * 0.35,
+    };
   }).filter(Boolean);
+  pool.sort((a, b) => b._score - a._score);
+  return pool.slice(0, n).map(({ _score, ...w }) => w);
 }
 
 function storyPrompt({ known, stretch, topic, sentences }) {
@@ -204,7 +218,19 @@ function assembleFallback() {
 // Bumped whenever the story format or vocabulary rules change, so a story cached
 // under older rules (e.g. one that leaked traditional characters) is discarded
 // rather than shown forever.
-const STORY_VERSION = 2;
+const STORY_VERSION = 3;
+
+// How much of this story the learner can actually decode, measured over characters
+// rather than words. The story's own glossed stretch words count as supported —
+// they are introduced on the page — so this number answers "is the REST of it
+// readable", which is the question that decides whether reading feels possible.
+function gradeStory(story) {
+  const supported = knownCharacters();
+  for (const nw of story.newWords || []) for (const c of nw.hanzi) supported.add(c);
+  const text = story.sentences.map(s => s.hanzi).join('');
+  const cov = charCoverage(text, supported);
+  return { ...story, coverage: cov.coverage, band: readabilityBand(cov.coverage), unknownChars: cov.unknown.slice(0, 8) };
+}
 
 export async function getStory({ fresh = false } = {}) {
   const raw = getModel('current_story', null);
@@ -222,8 +248,8 @@ export async function getStory({ fresh = false } = {}) {
     }
   }
 
-  const story = (await generateStory()) || assembleFallback();
-  if (story) { story.v = STORY_VERSION; setModel('current_story', story); }
+  let story = (await generateStory()) || assembleFallback();
+  if (story) { story = gradeStory(story); story.v = STORY_VERSION; setModel('current_story', story); }
   return story;
 }
 

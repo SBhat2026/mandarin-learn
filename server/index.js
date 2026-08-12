@@ -22,6 +22,7 @@ import { fullStats } from './stats.js';
 import { evaluateThrottle } from './scheduler.js';
 import { lookup } from './dictionary.js';
 import { passages } from './reading.js';
+import { readingProfile, highYieldCharacters, characterInsight } from './orthography.js';
 import { buildToneDrill, toneStats, weakTone } from './tone.js';
 import { saveOnboarding, onboardingState } from './onboarding.js';
 import { placementState, startPlacement, answerPlacement, skipPlacement } from './placement.js';
@@ -122,6 +123,9 @@ app.get('/api/home', wrap((req, res) => {
   // read about.
   const readReady = met >= STORY_MIN_WORDS;
   const story = getModel('current_story', null);
+  // Character coverage, not a level — "you can read most of a page" is a fact the
+  // learner can feel, where "unit 7 of 40" is only a position.
+  const reading = readReady ? readingProfile() : null;
 
   res.json({
     dueNow,
@@ -138,6 +142,9 @@ app.get('/api/home', wrap((req, res) => {
       wordsToUnlock: Math.max(0, STORY_MIN_WORDS - met),
       hasStory: !!story && !story.completed,
       title: story && !story.completed ? story.title : null,
+      charactersMet: reading?.charactersMet ?? 0,
+      coverage: reading?.estimatedCoverage ?? 0,
+      band: reading?.band ?? null,
       label: !readReady ? 'Unlocks once you have met a few words'
         : story && !story.completed ? 'Continue your story' : 'A new story at your level',
     },
@@ -288,6 +295,22 @@ app.post('/api/signal/choice', wrap((req, res) => {
 
 // ---- Reading passages ----
 app.get('/api/reading', wrap((req, res) => res.json({ passages: passages({}) })));
+
+// Where reading actually stands, plus the characters that would move it most.
+// Deliberately not a percentage of a syllabus: coverage of running text is the
+// number that decides whether a page is readable at all.
+app.get('/api/reading/profile', wrap((req, res) => res.json({
+  ...readingProfile(),
+  highYield: highYieldCharacters(6),
+})));
+
+// The tap-a-character moment. Returns the self-teaching prediction (guess the sound
+// from a series you already have evidence for) and the semantic-radical inference,
+// alongside the plain dictionary entry.
+app.get('/api/reading/char', wrap((req, res) => {
+  const term = String(req.query.hanzi || '');
+  res.json({ insight: characterInsight(term), results: lookup(term) });
+}));
 
 // ── Learner controls (hybrid agency): pace, today's topics, stretch ─────────
 // Visible levers over an otherwise-invisible engine. Pace = daily new-word budget;

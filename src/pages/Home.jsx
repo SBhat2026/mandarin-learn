@@ -58,9 +58,18 @@ export default function Home() {
           cta={read?.hasStory ? '接着读' : '读一读'}
           detail={
             read?.ready
-              ? (read.title
-                  ? <span className="text-[13px] text-ink-soft"><span className="hanzi text-[15px] mr-2">{read.title.hanzi}</span>{read.title.english}</span>
-                  : <span className="text-[13px] text-ink-faint">A short story written from the words you know.</span>)
+              ? (<>
+                  {read.title
+                    ? <span className="text-[13px] text-ink-soft"><span className="hanzi text-[15px] mr-2">{read.title.hanzi}</span>{read.title.english}</span>
+                    : <span className="text-[13px] text-ink-faint">A short story written from the words you know.</span>}
+                  {/* Coverage, not a level — the number that says whether a page is readable. */}
+                  {read.charactersMet > 0 && (
+                    <div className="text-[12px] text-ink-faint mt-1">
+                      <b className="text-ink">{read.charactersMet}</b> characters ·
+                      about <b className="text-ink">{Math.round((read.coverage || 0) * 100)}%</b> of everyday text
+                    </div>
+                  )}
+                </>)
               : <span className="text-[13px] text-ink-faint">Meet a few more words in conversation and a story appears here.</span>
           }
         />
