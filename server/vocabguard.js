@@ -15,7 +15,7 @@ import { db } from './db.js';
 import { pinyinForHanzi, glossForHanzi } from './pronunciation.js';
 import { knownWordIds } from './planner.js';
 import { newCandidates } from './planner.js';
-import { imageFor } from './images.js';
+import { imageFor, EVERYDAY_KEYWORDS } from './images.js';
 
 const CJK = /[一-鿿]/;
 const isCjk = (c) => CJK.test(c);
@@ -25,23 +25,30 @@ const cjkOnly = (s = '') => [...String(s)].filter(isCjk).join('');
 // Curated, deliberately SHORT. These are the structural glue (pronouns, numbers,
 // measures, copula/negation/question particles) a learner acquires in context, not
 // as isolated flashcards. Rung 0 is minimal; higher rungs widen it a little.
+// NOTE (2026-08-12): the everyday HSK-1 verbs 喜欢/在/去/吃/喝/看/想 moved DOWN into
+// rung 0. They are exactly the "acquired in context" glue this list is for, every
+// frame that uses them glosses them word-by-word, and without them rung 0 had only
+// 是/有/几个 to say — which is what made a guided session grind the same two nouns
+// through "this is X / how many X do you have" over and over.
 const CORE_RUNG0 = ['我', '你', '他', '她', '它', '这', '那', '是', '不', '没',
   '的', '吗', '呢', '了', '有', '也', '很', '和', '都', '好',
   '个', '只', '本', '杯', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '两', '几', '多少',
+  '喜欢', '在', '去', '吃', '喝', '看', '想', '什么', '这个', '那个', '今天',
   '你好', '谢谢', '再见', '对', '请问', '吧'];
-const CORE_RUNG1 = [...CORE_RUNG0, '们', '什么', '谁', '哪', '这个', '那个', '哪个',
-  '喜欢', '想', '要', '会', '在', '去', '来', '看', '吃', '喝', '说',
-  '很多', '一点', '现在', '今天', '明天', '昨天', '因为', '所以', '但是', '觉得', '可以', '真'];
+const CORE_RUNG1 = [...CORE_RUNG0, '们', '谁', '哪', '哪个', '得', '还是',
+  '要', '会', '来', '说',
+  '很多', '一点', '现在', '明天', '昨天', '因为', '所以', '但是', '觉得', '可以', '真'];
 
 // Clean interlinear glosses for the core function words (the dictionary gloss for
 // these is noisy). Content words fall through to glossForHanzi.
 const FUNCTION_GLOSS = {
   我: 'I/me', 你: 'you', 他: 'he', 她: 'she', 它: 'it', 们: '(plural)',
   这: 'this', 那: 'that', 这个: 'this', 那个: 'that', 哪: 'which', 哪个: 'which',
-  是: 'is', 不: 'not', 没: 'not/none', 有: 'have', 的: '(of)', 了: '(done)',
+  是: 'is', 不: 'not', 没: 'not/none', 有: 'have', 的: '(of)', 了: '(done)', 得: '(how well)',
   吗: '(question)', 呢: '(question)', 吧: '(suggestion)', 也: 'also', 很: 'very',
   和: 'and', 都: 'all', 好: 'good', 多少: 'how many', 几: 'how many',
   什么: 'what', 谁: 'who', 喜欢: 'like', 想: 'want', 要: 'want', 会: 'can', 在: 'at',
+  还是: 'or',
   个: '(measure)', 只: '(measure)', 本: '(measure)', 杯: 'cup of',
   一: 'one', 二: 'two', 两: 'two', 三: 'three', 四: 'four', 五: 'five',
   六: 'six', 七: 'seven', 八: 'eight', 九: 'nine', 十: 'ten',
@@ -57,9 +64,9 @@ const FUNCTION_GLOSS = {
 const CORE_PINYIN = {
   我: 'wǒ', 你: 'nǐ', 他: 'tā', 她: 'tā', 它: 'tā', 们: 'men',
   这: 'zhè', 那: 'nà', 这个: 'zhège', 那个: 'nàge', 哪: 'nǎ', 哪个: 'nǎge',
-  是: 'shì', 不: 'bù', 没: 'méi', 有: 'yǒu', 的: 'de', 了: 'le',
+  是: 'shì', 不: 'bù', 没: 'méi', 有: 'yǒu', 的: 'de', 了: 'le', 得: 'de',
   吗: 'ma', 呢: 'ne', 吧: 'ba', 也: 'yě', 很: 'hěn', 和: 'hé', 都: 'dōu', 好: 'hǎo',
-  多少: 'duōshao', 几: 'jǐ', 什么: 'shénme', 谁: 'shéi', 喜欢: 'xǐhuan', 想: 'xiǎng',
+  多少: 'duōshao', 几: 'jǐ', 什么: 'shénme', 谁: 'shéi', 喜欢: 'xǐhuan', 想: 'xiǎng', 还是: 'háishì',
   要: 'yào', 会: 'huì', 在: 'zài', 去: 'qù', 来: 'lái', 看: 'kàn', 吃: 'chī', 喝: 'hē', 说: 'shuō',
   个: 'gè', 只: 'zhī', 本: 'běn', 杯: 'bēi',
   一: 'yī', 二: 'èr', 两: 'liǎng', 三: 'sān', 四: 'sì', 五: 'wǔ', 六: 'liù', 七: 'qī', 八: 'bā', 九: 'jiǔ', 十: 'shí',
@@ -100,12 +107,17 @@ export function allowedSet({ rung = 0, sessionWords = [] } = {}) {
 export function segment(text) {
   const s = cjkOnly(text);
   const lookup = db().prepare('SELECT 1 FROM words WHERE hanzi=?');
+  // Core function words are guaranteed-known units and must segment as units even
+  // when the imported dictionary happens not to carry them as rows — otherwise
+  // 明天 splits into 明 + 天 and reaches the UI as un-glossed bare characters.
+  const core = coreSet(1);
   const out = [];
   let i = 0;
   while (i < s.length) {
     let seg = s[i], len = 1;
     for (let l = Math.min(4, s.length - i); l >= 2; l--) {
-      if (lookup.get(s.slice(i, i + l))) { seg = s.slice(i, i + l); len = l; break; }
+      const cand = s.slice(i, i + l);
+      if (core.has(cand) || lookup.get(cand)) { seg = cand; len = l; break; }
     }
     out.push(seg); i += len;
   }
@@ -140,86 +152,272 @@ export function groundTokens(hanzi, { newSet = new Set() } = {}) {
     audioRef: null,
   }));
 }
-function cleanShort(g) { return g ? String(g).split(/[;,·]/)[0].trim().slice(0, 22) : ''; }
+// One sense, chosen for a LEARNER rather than taken in dictionary order. CEDICT
+// lists archaic senses first often enough that the naive first-sense gloss produced
+// "city walls" for 城, "hog" for 猪 and "wine shop" for 酒店 — each of which then
+// became the English the learner was taught. So: prefer a sense that names an
+// everyday concept, then a short one.
+function scrub(sense) {
+  return String(sense || '')
+    .replace(/\([^)]*\)/g, ' ')
+    .split('(')[0]                       // an unbalanced "(courteous" survived the above
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function senseScore(s) {
+  if (!s) return -99;
+  const words = s.toLowerCase().split(/\s+/);
+  let score = 0;
+  for (const w of words) {
+    const bare = w.replace(/[^a-z]/g, '');
+    if (EVERYDAY_KEYWORDS.has(bare) || EVERYDAY_KEYWORDS.has(bare.replace(/s$/, ''))) { score += 3; break; }
+  }
+  score += words.length === 1 ? 1.5 : -0.5 * (words.length - 1);
+  if (/^to\s/.test(s)) score -= 1;                    // a verb reading of a noun entry
+  return score;
+}
+export function shortGloss(g) { return cleanShort(g); }
+function cleanShort(g) {
+  if (!g) return '';
+  const senses = String(g).split(/[;,·]/).map(scrub).filter(Boolean);
+  if (!senses.length) return '';
+  let best = senses[0], bestScore = senseScore(senses[0]);
+  // Only the first few senses are candidates — deep in the list is where the truly
+  // obscure readings live.
+  for (const s of senses.slice(1, 4)) {
+    const sc = senseScore(s);
+    if (sc > bestScore) { best = s; bestScore = sc; }
+  }
+  return best.slice(0, 22);
+}
+
+// ── Semantic categories: what you can sensibly SAY about a noun ─────────────
+// A frame is only decodable if it is also SENSIBLE. Rotating "你有几个X？" over
+// whatever picturable noun came up produced things like "how many senior high
+// schools do you have?" and "how many suns do you have?" — grammatical, glossable,
+// and nonsense. Every noun therefore gets a coarse category, and every frame
+// declares which categories it fits. Derived from the (already curated) emoji
+// anchor plus gloss keywords — no new hand-maintained vocabulary list.
+const CATEGORY_KEYWORDS = [
+  ['person', ['teacher', 'student', 'doctor', 'friend', 'baby', 'child', 'boy', 'girl', 'man', 'woman',
+    'mother', 'father', 'sister', 'brother', 'people', 'person', 'family', 'nurse', 'worker', 'driver']],
+  ['creature', ['cat', 'dog', 'bird', 'fish', 'horse', 'pig', 'cow', 'sheep', 'chicken', 'rabbit',
+    'tiger', 'panda', 'mouse', 'snake', 'dragon', 'monkey', 'bear', 'elephant', 'animal', 'insect']],
+  ['drink', ['tea', 'coffee', 'milk', 'water', 'wine', 'beer', 'juice', 'soup', 'drink']],
+  ['food', ['rice', 'noodle', 'bread', 'egg', 'meat', 'apple', 'banana', 'fruit', 'vegetable',
+    'dumpling', 'cake', 'food', 'meal', 'breakfast', 'lunch', 'dinner', 'candy', 'sugar', 'fish']],
+  ['place', ['school', 'hospital', 'shop', 'store', 'restaurant', 'house', 'home', 'city', 'road',
+    'country', 'park', 'room', 'office', 'station', 'market', 'library', 'university', 'college',
+    'classroom', 'village', 'town', 'street', 'bank', 'hotel', 'airport', 'building', 'entrance',
+    'gate', 'floor', 'apartment', 'kitchen', 'garden', 'zoo', 'museum', 'factory']],
+  // Weather and landscape: there IS sun today, you don't own two of them.
+  ['nature', ['sun', 'moon', 'star', 'sky', 'rain', 'snow', 'cloud', 'wind', 'fire', 'mountain',
+    'sea', 'river', 'weather', 'earth', 'world', 'air',
+    'ocean', 'lake', 'island', 'forest', 'field', 'hill', 'stone', 'rock', 'sand', 'ice']],
+  // Plants are countable things you can have and like — kept apart from weather so
+  // nobody gets asked whether there is flower today.
+  ['plant', ['tree', 'flower', 'grass', 'leaf', 'plant', 'seed', 'root', 'bamboo', 'rose']],
+  // Body parts: you can point at them and like them, but "I have two hands" is not
+  // a sentence anyone says to a beginner.
+  ['body', ['hand', 'eye', 'foot', 'face', 'head', 'hair', 'mouth', 'nose', 'ear', 'arm',
+    'leg', 'heart', 'tooth', 'finger', 'body', 'back', 'skin']],
+];
+
+// The category of a noun token. `object` is the default: a countable, ownable,
+// pointable-at thing, which is what the original frames all assumed.
+export function nounCategory(word) {
+  const hanzi = typeof word === 'string' ? word : word?.hanzi;
+  if (!hanzi) return 'object';
+  const glossText = (typeof word === 'object' && word.gloss)
+    ? word.gloss
+    : (glossForHanzi(hanzi) || '');
+  const s = ` ${String(glossText).toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ')} `;
+  for (const [cat, words] of CATEGORY_KEYWORDS) {
+    for (const kw of words) if (s.includes(` ${kw} `) || s.includes(` ${kw}s `)) return cat;
+  }
+  return 'object';
+}
+
+// Categories you can own and count with 个 — the precondition for 有/几个 frames.
+const COUNTABLE = ['object', 'creature', 'person', 'food', 'drink', 'plant'];
+const ALL_CATS = ['object', 'creature', 'person', 'food', 'drink', 'place', 'nature', 'body', 'plant'];
+// Things it makes sense to have an OPINION about. "Do you like both hands?" is the
+// kind of sentence that made these conversations feel like a machine talking.
+const LIKEABLE = ALL_CATS.filter(c => c !== 'body' && c !== 'person');
+
+// "How many boat do you have?" — the count frame is the one place plural matters.
+function plural(gloss) {
+  const g = String(gloss || '').trim();
+  if (!g || MASS.has(g.toLowerCase()) || /s$/i.test(g) || /\s/.test(g)) return g;
+  if (/(ch|sh|x|z)$/i.test(g)) return `${g}es`;
+  if (/[^aeiou]y$/i.test(g)) return `${g.slice(0, -1)}ies`;
+  return `${g}s`;
+}
+
+// English rendering helper: a bare gloss reads as "This is car." Countable things
+// take an article; mass nouns, places and body parts read better without one.
+const NO_ARTICLE = new Set(['nature', 'drink', 'place']);
+// Mass nouns take no article whatever their category ("This is a rice").
+const MASS = new Set(['rice', 'meat', 'bread', 'food', 'fruit', 'water', 'tea', 'milk', 'soup',
+  'sugar', 'money', 'music', 'fire', 'snow', 'rain', 'grass', 'hair', 'wine', 'beer', 'oil', 'paper']);
+function withArticle(gloss, category) {
+  const g = String(gloss || '').trim();
+  if (!g || NO_ARTICLE.has(category) || MASS.has(g.toLowerCase())) return g;
+  if (/^(a|an|the|some|to)\s/i.test(g)) return g;
+  if (category === 'body') return `your ${g}`;
+  return `${/^[aeiou]/i.test(g) ? 'an' : 'a'} ${g}`;
+}
+const A = (n) => withArticle(n.gloss, n.category || nounCategory(n));
 
 // ── Controlled frames (rung 0/1) ────────────────────────────────────────────
 // Each frame is a template whose fixed tokens are core words and whose slots are
 // filled ONLY from the allowed set. Qwen never selects vocabulary here; the sentence
 // is fully determined, so rung 0 is deterministic, offline, and always decodable.
-// `n` is a chosen noun vocab token {hanzi,pinyin,gloss}; `num` a small integer.
+// `fits` is the semantic gate above; `n` is a chosen noun vocab token; `num` a small
+// integer. `pair` frames take a SECOND noun so a session can combine what it taught.
 const NUM_HANZI = ['', '一', '两', '三', '四', '五'];
 const f = (hanzi) => ({ hanzi, fixed: true });     // fixed core token
 const FRAMES = [
-  { id: 'this-is', rung: 0, kind: 'statement',
+  // — universal: naming/pointing works for anything —
+  { id: 'this-is', rung: 0, kind: 'statement', fits: ALL_CATS,
     parts: (n) => [f('这'), f('是'), n, f('。')],
-    english: (n) => `This is ${n.gloss}.` },
-  { id: 'this-is-q', rung: 0, kind: 'yesno',
+    english: (n) => `This is ${A(n)}.` },
+  { id: 'this-is-q', rung: 0, kind: 'yesno', fits: ALL_CATS,
     parts: (n) => [f('这'), f('是'), n, f('吗'), f('？')],
-    english: (n) => `Is this ${n.gloss}?` },
-  { id: 'i-have', rung: 0, kind: 'statement',
-    parts: (n) => [f('我'), f('有'), n, f('。')],
-    english: (n) => `I have ${n.gloss}.` },
-  { id: 'you-have-q', rung: 0, kind: 'yesno',
-    parts: (n) => [f('你'), f('有'), n, f('吗'), f('？')],
-    english: (n) => `Do you have ${n.gloss}?` },
-  { id: 'i-have-num', rung: 0, kind: 'statement',
-    parts: (n, num) => [f('我'), f('有'), f(NUM_HANZI[num] || '一'), f('个'), n, f('。')],
-    english: (n, num) => `I have ${num || 1} ${n.gloss}.` },
-  { id: 'how-many-q', rung: 0, kind: 'count',
-    parts: (n) => [f('你'), f('有'), f('几'), f('个'), n, f('？')],
-    english: (n) => `How many ${n.gloss} do you have?` },
-  { id: 'i-like', rung: 1, kind: 'statement',
+    english: (n) => `Is this ${A(n)}?` },
+  { id: 'i-like', rung: 0, kind: 'statement', fits: LIKEABLE,
     parts: (n) => [f('我'), f('喜欢'), n, f('。')],
     english: (n) => `I like ${n.gloss}.` },
-  { id: 'do-you-like-q', rung: 1, kind: 'yesno',
+  { id: 'do-you-like-q', rung: 0, kind: 'yesno', fits: LIKEABLE,
     parts: (n) => [f('你'), f('喜欢'), n, f('吗'), f('？')],
     english: (n) => `Do you like ${n.gloss}?` },
+  // — countable, ownable things only —
+  { id: 'i-have', rung: 0, kind: 'statement', fits: COUNTABLE,
+    parts: (n) => [f('我'), f('有'), n, f('。')],
+    english: (n) => `I have ${A(n)}.` },
+  { id: 'you-have-q', rung: 0, kind: 'yesno', fits: COUNTABLE,
+    parts: (n) => [f('你'), f('有'), n, f('吗'), f('？')],
+    english: (n) => `Do you have ${A(n)}?` },
+  { id: 'i-have-num', rung: 0, kind: 'statement', fits: COUNTABLE,
+    parts: (n, num) => [f('我'), f('有'), f(NUM_HANZI[num] || '一'), f('个'), n, f('。')],
+    english: (n, num) => `I have ${num || 1} ${(num || 1) > 1 ? plural(n.gloss) : n.gloss}.` },
+  { id: 'how-many-q', rung: 0, kind: 'count', fits: COUNTABLE,
+    parts: (n) => [f('你'), f('有'), f('几'), f('个'), n, f('？')],
+    english: (n) => `How many ${plural(n.gloss)} do you have?` },
+  // — places: you go to them / are at them, you don't own two of them —
+  { id: 'go-place-q', rung: 0, kind: 'yesno', fits: ['place'],
+    parts: (n) => [f('你'), f('今天'), f('去'), n, f('吗'), f('？')],
+    english: (n) => `Are you going to ${n.gloss} today?` },
+  { id: 'at-place', rung: 0, kind: 'statement', fits: ['place'],
+    parts: (n) => [f('我'), f('在'), n, f('。')],
+    english: (n) => `I'm at ${n.gloss}.` },
+  { id: 'at-place-q', rung: 0, kind: 'yesno', fits: ['place'],
+    parts: (n) => [f('你'), f('在'), n, f('吗'), f('？')],
+    english: (n) => `Are you at ${n.gloss}?` },
+  // — weather/sky/landscape: you look at it, it's there today —
+  { id: 'today-has-q', rung: 0, kind: 'yesno', fits: ['nature'],
+    parts: (n) => [f('今天'), f('有'), n, f('吗'), f('？')],
+    english: (n) => `Is there ${n.gloss} today?` },
+  { id: 'look-at', rung: 0, kind: 'statement', fits: ['nature', 'creature', 'object', 'body', 'plant'],
+    parts: (n) => [f('你'), f('看'), f('，'), f('这'), f('是'), n, f('。')],
+    english: (n) => `Look — this is ${A(n)}.` },
+  // — food / drink —
+  { id: 'like-eat-q', rung: 0, kind: 'yesno', fits: ['food'],
+    parts: (n) => [f('你'), f('喜欢'), f('吃'), n, f('吗'), f('？')],
+    english: (n) => `Do you like eating ${n.gloss}?` },
+  { id: 'want-eat', rung: 0, kind: 'statement', fits: ['food'],
+    parts: (n) => [f('我'), f('想'), f('吃'), n, f('。')],
+    english: (n) => `I want to eat ${n.gloss}.` },
+  { id: 'like-drink-q', rung: 0, kind: 'yesno', fits: ['drink'],
+    parts: (n) => [f('你'), f('喜欢'), f('喝'), n, f('吗'), f('？')],
+    english: (n) => `Do you like drinking ${n.gloss}?` },
+  { id: 'want-drink', rung: 0, kind: 'statement', fits: ['drink'],
+    parts: (n) => [f('我'), f('想'), f('喝'), n, f('。')],
+    english: (n) => `I want to drink ${n.gloss}.` },
+  // — people —
+  { id: 'is-person-q', rung: 0, kind: 'yesno', fits: ['person'],
+    parts: (n) => [f('他'), f('是'), n, f('吗'), f('？')],
+    english: (n) => `Is he ${A(n)}?` },
+  // — PAIR frames: combine two of today's words into one bigger sentence —
+  { id: 'like-both', rung: 0, kind: 'statement', pair: true, fits: LIKEABLE,
+    parts: (n, num, o) => [f('我'), f('喜欢'), n, f('和'), o, f('。')],
+    english: (n, num, o) => `I like ${n.gloss} and ${o.gloss}.` },
+  { id: 'which-do-you-like-q', rung: 1, kind: 'choice', pair: true, fits: LIKEABLE,
+    parts: (n, num, o) => [f('你'), f('喜欢'), n, f('，'), f('还是'), o, f('？')],
+    english: (n, num, o) => `Do you like ${n.gloss}, or ${o.gloss}?` },
 ];
 
 // Scaffolded ready-to-say responses for a frame — glossed, always in the allowed set,
 // never a puzzle. The learner can tap one instead of open production. `other` is a
 // second session noun (for a contrasting answer) when available.
+// Scaffolded replies are built from the FRAME's actual shape, so a tap always
+// produces a sensible answer to the question that was asked (never "I have two
+// suns"). `other` is a second session noun for a contrasting answer.
 function choicesFor(frame, n, other) {
-  const tok = (hanzi) => ({ hanzi, pinyin: py(hanzi) || pinyinForHanzi(cjkOnly(hanzi)), gloss: glossEnglish(hanzi, n, other) });
+  const tok = (hanzi, gloss) => ({ hanzi, pinyin: py(hanzi) || pinyinForHanzi(cjkOnly(hanzi)), gloss });
+  const cat = n.category || 'object';
   switch (frame.kind) {
-    case 'yesno':
-      return [tok('对。'), tok('不是。'), other ? tok(`这是${other.hanzi}。`) : null].filter(Boolean);
     case 'count':
-      return [tok('一个。'), tok('两个。'), tok('三个。')];
-    default: // statement → invite a simple echo / reciprocal
-      return [tok('好。'), other ? tok(`我有${other.hanzi}。`) : tok('我也有。')];
+      return [tok('一个。', 'One.'), tok('两个。', 'Two.'), tok('三个。', 'Three.')];
+    case 'choice':
+      return [tok(`我喜欢${n.hanzi}。`, `I like ${n.gloss}.`),
+        other ? tok(`我喜欢${other.hanzi}。`, `I like ${other.gloss}.`) : null,
+        tok('都喜欢。', 'Both.')].filter(Boolean);
+    case 'yesno': {
+      const yes = frame.id.startsWith('like-eat') ? tok('我喜欢吃。', 'I like it.')
+        : frame.id.startsWith('like-drink') ? tok('我喜欢喝。', 'I like it.')
+        : frame.id === 'go-place-q' ? tok('我去。', "I'm going.")
+        : frame.id === 'at-place-q' ? tok('我在。', 'I am.')
+        : frame.id === 'today-has-q' ? tok('今天有。', 'There is.')
+        : frame.id === 'do-you-like-q' ? tok(`我喜欢${n.hanzi}。`, `I like ${n.gloss}.`)
+        : tok('对。', 'Right.');
+      const no = frame.id === 'go-place-q' ? tok('我不去。', "I'm not.")
+        : frame.id === 'today-has-q' ? tok('今天没有。', "There isn't.")
+        : /like|have/.test(frame.id) ? tok('我不喜欢。', "I don't.")
+        : tok('不是。', "It isn't.");
+      const third = other ? tok(`我喜欢${other.hanzi}。`, `I like ${other.gloss}.`) : null;
+      return [yes, no, third].filter(Boolean);
+    }
+    default: {
+      // Statement → invite a reciprocal the learner can actually mean.
+      const mirror = cat === 'place' ? tok(`我也去${n.hanzi}。`, `I go to ${n.gloss} too.`)
+        : cat === 'food' ? tok(`我也想吃。`, 'Me too.')
+        : cat === 'drink' ? tok(`我也想喝。`, 'Me too.')
+        : (cat === 'nature' || cat === 'body') ? tok(`我也喜欢${n.hanzi}。`, `I like ${n.gloss} too.`)
+        : tok(`我也有${n.hanzi}。`, `I have ${A(n)} too.`);
+      return [tok('好。', 'OK.'), mirror,
+        other ? tok(`我喜欢${other.hanzi}。`, `I like ${other.gloss}.`) : null].filter(Boolean);
+    }
   }
 }
-function glossEnglish(hanzi, n, other) {
-  const map = { '对。': 'Right.', '不是。': "It isn't.", '好。': 'OK.', '我也有。': 'Me too.',
-    '一个。': 'One.', '两个。': 'Two.', '三个。': 'Three.' };
-  if (map[hanzi]) return map[hanzi];
-  if (hanzi.includes('我有')) return `I have ${other?.gloss || n.gloss}.`;
-  if (hanzi.includes('这是') && other && hanzi.includes(other.hanzi)) return `This is ${other.gloss}.`;
-  if (other && hanzi.includes(other.hanzi)) return `${other.gloss}.`;
-  return '';
-}
 
-// Pick a frame for this turn: rotate by turn index within the rung's frames, and
-// prefer a question frame (so the learner is invited to respond) most turns.
-export function pickFrame({ rung = 0, turnIndex = 0, prefer = null } = {}) {
-  const pool = FRAMES.filter(fr => fr.rung <= rung);
-  if (prefer) { const p = pool.find(fr => fr.id === prefer); if (p) return p; }
-  const questions = pool.filter(fr => fr.kind !== 'statement');
-  const bank = (turnIndex % 3 === 0 && rung === 0) ? pool : (questions.length ? questions : pool);
-  return bank[turnIndex % bank.length];
+// Pick a frame for this turn. Three gates, in order: the rung must allow it, the
+// noun's CATEGORY must fit it (semantic sense), and it must not repeat a frame the
+// session already used on this word (variety). Question frames are preferred so the
+// learner is usually invited to respond.
+export function pickFrame({ rung = 0, turnIndex = 0, prefer = null, category = 'object', pair = false, exclude = [] } = {}) {
+  const fits = (fr) => fr.rung <= rung && (fr.fits || ALL_CATS).includes(category) && !!fr.pair === !!pair;
+  const pool = FRAMES.filter(fits);
+  if (prefer) { const p = FRAMES.find(fr => fr.id === prefer && fr.rung <= rung); if (p) return p; }
+  if (!pool.length) return FRAMES[0];                       // 这是X。always works
+  const fresh = pool.filter(fr => !exclude.includes(fr.id));
+  const bank0 = fresh.length ? fresh : pool;                // exhausted → allow repeats
+  const questions = bank0.filter(fr => fr.kind !== 'statement');
+  const bank = (turnIndex % 3 === 0) ? bank0 : (questions.length ? questions : bank0);
+  return bank[Math.abs(turnIndex) % bank.length];
 }
 
 // Build a fully-grounded frame turn: aligned tokens, natural English, scaffolded
 // choices, and the meet-the-words payload when this turn introduces a word. The
 // vocabulary comes only from `sessionWords`; nothing new is invented.
-export function buildFrameTurn({ rung = 0, sessionWords = [], turnIndex = 0, num = 1, focusHanzi = null, prefer = null }) {
+export function buildFrameTurn({ rung = 0, sessionWords = [], turnIndex = 0, num = 1, focusHanzi = null, prefer = null, pair = false, exclude = [] }) {
   const nouns = sessionWords.filter(Boolean);
   if (!nouns.length) return null;
-  const n = (focusHanzi && nouns.find(w => w.hanzi === focusHanzi)) || nouns[turnIndex % nouns.length];
+  const n = (focusHanzi && nouns.find(w => w.hanzi === focusHanzi)) || nouns[Math.abs(turnIndex) % nouns.length];
   const other = nouns.find(w => w.hanzi !== n.hanzi) || null;
-  const frame = pickFrame({ rung, turnIndex, prefer });
-  const parts = frame.parts(nounTok(n), num);
+  const category = n.category || nounCategory(n);
+  const frame = pickFrame({ rung, turnIndex, prefer, category, pair: pair && !!other, exclude });
+  const parts = frame.parts(nounTok(n), num, other ? nounTok(other) : nounTok(n));
 
   const tokens = parts.map(p => {
     if (p.fixed) return { hanzi: p.hanzi, pinyin: /[。，？！、]/.test(p.hanzi) ? '' : py(p.hanzi),
@@ -230,10 +428,11 @@ export function buildFrameTurn({ rung = 0, sessionWords = [], turnIndex = 0, num
   return {
     hanzi,
     pinyin: tokens.filter(t => t.pinyin).map(t => t.pinyin).join(' '),
-    english: frame.english(n, num),
+    english: frame.english(n, num, other || n),
     tokens,
-    choices: choicesFor(frame, n, other),
+    choices: choicesFor(frame, { ...n, category }, other),
     frameId: frame.id,
+    focusHanzi: n.hanzi,
     _frame: true,
   };
 }
@@ -246,6 +445,22 @@ function nounTok(w) { return { hanzi: w.hanzi, pinyin: w.pinyin || py(w.hanzi), 
 // Picturability (an emoji anchor exists) is a strong, free signal of a decodable,
 // meetable beginner noun. No hand-curated syllabus.
 const NOUN_POS = new Set(['n', 'ns', 'nr', 'nz', 'nt']);
+
+// A beginner word has to be NAMEABLE, and the imported dictionary is full of
+// entries whose "gloss" is a description, not a name — 楼 came through as "house
+// with more than 1", which then got poured into every frame as if it were a word.
+// A gloss that reads like a definition is a reliable signal the entry is a bad
+// first word, whatever its frequency.
+export function isNamable(g) { return namableGloss(g); }
+function namableGloss(g) {
+  const s = String(g || '').trim();
+  if (!s || s.length > 18) return false;
+  if (/\d/.test(s)) return false;                                  // "house with more than 1"
+  if (/\b(with|than|which|used|kind of|sort of|classifier|measure word|abbr|surname|variant|see also|form of|courteous|polite|honorific|pronoun)\b/i.test(s)) return false;
+  if (s.split(/\s+/).length > 3) return false;                     // a phrase, not a name
+  return true;
+}
+
 export function beginnerNewWords(n = 3, { introduced } = {}) {
   const cands = newCandidates(240, introduced);
   const core = coreSet(1);                                       // never "meet" a function word
@@ -254,7 +469,7 @@ export function beginnerNewWords(n = 3, { introduced } = {}) {
   // noun+concrete words only if we couldn't find enough picturable ones.
   const picturableTier = [], nounTier = [];
   for (const c of cands) {
-    const w = db().prepare('SELECT hanzi, freq_rank, concrete, particle, pos FROM words WHERE id=?').get(c.id);
+    const w = db().prepare('SELECT hanzi, freq_rank, concrete, particle, pos, gloss, english FROM words WHERE id=?').get(c.id);
     if (!w || w.particle || core.has(w.hanzi)) continue;
     const charLen = [...w.hanzi].filter(isCjk).length;
     if (charLen > 2) continue;                                  // low character load
@@ -263,6 +478,14 @@ export function beginnerNewWords(n = 3, { introduced } = {}) {
     // the hand"→✋, 忍 "to bear"→🐻) would false-positive as picturable without this.
     let isNoun = false; try { isNoun = JSON.parse(w.pos || '[]').some(p => NOUN_POS.has(p)); } catch {}
     if (!isNoun) continue;
+    // Judge the gloss the learner will actually SEE (same resolution as vocabToken),
+    // not a different one — otherwise the filter and the display disagree.
+    const gloss = cleanShort(w.gloss || w.english || glossForHanzi(w.hanzi));
+    if (!namableGloss(gloss)) continue;
+    // Body parts are nameable and picturable but make poor conversation subjects at
+    // this level: with only these frames the talk becomes "is this your foot? do you
+    // like your face?". They are still taught through reading and reps.
+    if (nounCategory({ hanzi: w.hanzi, gloss }) === 'body') continue;
     const img = imageFor(w.hanzi);
     if (img.kind !== 'none') picturableTier.push({ id: c.id, hanzi: w.hanzi, score: c.score + (charLen === 1 ? 0.6 : 0), picturable: true });
     else if ((w.concrete ?? 0) >= 2) nounTier.push({ id: c.id, hanzi: w.hanzi, score: c.score, picturable: false });
@@ -277,9 +500,13 @@ export function vocabToken(wordId) {
   const w = db().prepare('SELECT id, hanzi, pinyin, gloss, english, audio_path FROM words WHERE id=?').get(wordId);
   if (!w) return null;
   const img = imageFor(w.hanzi);
+  const gloss = cleanShort(w.gloss || w.english || glossForHanzi(w.hanzi));
   return {
     wordId: w.id, hanzi: w.hanzi, pinyin: w.pinyin || pinyinForHanzi(w.hanzi) || '',
-    gloss: cleanShort(w.gloss || w.english || glossForHanzi(w.hanzi)),
+    gloss,
+    // The semantic category rides with the token so every frame/choice decision
+    // downstream stays sensible for THIS kind of noun.
+    category: nounCategory({ hanzi: w.hanzi, gloss }),
     audioRef: w.audio_path || null,
     imageRef: img.kind !== 'none' ? img : null,
   };

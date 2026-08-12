@@ -19,6 +19,12 @@ function cjkOnly(s = '') {
 
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.QWEN_MODEL || 'qwen3.5:latest';
+// Ollama defaults to a 4096-token context. The executor prompt (persona + blueprint +
+// directives + the learner's known-word list + conversation history) overruns that
+// once a learner has any vocabulary, and an overrun prompt gets silently truncated —
+// which showed up as Laoshi returning an EMPTY turn and the UI hanging on "老师…".
+// Ask for a window that actually fits the prompt we send.
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX || 8192);
 const DASHSCOPE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
 const DASHSCOPE_MODEL = process.env.DASHSCOPE_MODEL || 'qwen-plus';
 
@@ -31,22 +37,35 @@ const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-inst
 
 // OpenAI-compatible OpenRouter chat. Minimal by design; not reached unless the flag
 // is on. TODO(openrouter): activate for remote hosting (see docs/openrouter.md).
+// Bounded: a big remote reasoning model can take minutes per turn, and a teacher who
+// takes minutes to answer is not a conversation. Past the deadline we abandon it and
+// fall through to the local model, which always answers.
+const OPENROUTER_TIMEOUT_MS = Number(process.env.OPENROUTER_TIMEOUT_MS || 45000);
+
 async function chatOpenRouter(messages, { temperature = 0.6, max_tokens = 512, json = false, kind = 'conversation' } = {}) {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) throw new Error('OPENROUTER_API_KEY not set');
-  const r = await fetch(OPENROUTER_URL, {
-    method: 'POST',
+  const r = await withTimeout(sig => fetch(OPENROUTER_URL, {
+    method: 'POST', signal: sig,
     headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
     // usage.include asks OpenRouter to report the ACTUAL charged cost, so the
     // spend ledger reflects real billing rather than a local price estimate.
+    // reasoning.exclude keeps THINKING models (qwen3-235b-a22b and friends) from
+    // putting the answer in `reasoning` and leaving `content` empty or garbage —
+    // which reached the UI as a blank teacher bubble.
     body: JSON.stringify({ model: OPENROUTER_MODEL, messages, temperature, max_tokens,
       usage: { include: true },
+      reasoning: { exclude: true },
       ...(json ? { response_format: { type: 'json_object' } } : {}) }),
-  });
+  }), OPENROUTER_TIMEOUT_MS);
   if (!r.ok) throw new Error(`OpenRouter ${r.status}`);
   const d = await r.json();
   if (d.usage?.cost != null) recordSpend(d.usage.cost, { kind });
-  return { text: d.choices?.[0]?.message?.content ?? '', via: 'openrouter' };
+  const msg = d.choices?.[0]?.message ?? {};
+  // Some providers ignore reasoning.exclude and still answer inside `reasoning`.
+  const text = String(msg.content ?? '').trim() || String(msg.reasoning ?? '').trim();
+  if (!text) throw new Error('OpenRouter returned an empty completion');
+  return { text, via: 'openrouter' };
 }
 
 async function withTimeout(promise, ms) {
@@ -79,9 +98,15 @@ export async function chat(messages, { temperature = 0.6, max_tokens = 512, json
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: OLLAMA_MODEL, messages, stream: false, think: false,
           ...(json ? { format: 'json' } : {}),
-          options: { temperature, num_predict: max_tokens } }),
-      }), 60000);
-      if (r.ok) { const d = await r.json(); return { text: d.message?.content ?? '', via: 'ollama' }; }
+          options: { temperature, num_predict: max_tokens, num_ctx: OLLAMA_NUM_CTX } }),
+      }), 90000);
+      if (r.ok) {
+        const d = await r.json();
+        const text = String(d.message?.content ?? '').trim();
+        // An EMPTY completion is a failure, not an answer — falling through to the
+        // next backend beats handing the UI a blank teacher bubble.
+        if (text) return { text, via: 'ollama' };
+      }
     } catch (e) { /* fall through to cloud */ }
   }
   // 2) DashScope fallback
@@ -105,7 +130,7 @@ export async function available() {
 
 // The hidden conversation lifecycle. Qwen's behavior shifts by stage, but the
 // stage itself is NEVER shown to the learner. The turn endpoint advances it.
-export const STAGES = ['opening', 'personal_connection', 'explore', 'introduce', 'practice', 'confirm', 'wrap'];
+export const STAGES = ['opening', 'personal_connection', 'explore', 'introduce', 'practice', 'confirm', 'wrap', 'farewell'];
 
 // Derive the current stage from how far the conversation has run against the
 // blueprint's exchange budget, plus the hidden shouldWrap signal from momentum/
@@ -140,7 +165,13 @@ function stageDirective(stage, bp) {
     case 'confirm':
       return 'Invite one more natural use to lightly confirm they can handle it. Keep it low-stakes and encouraging.';
     case 'wrap':
-      return `Wrap up NATURALLY now: ${bp.exitStrategy} Refer back to something you actually talked about, and leave a warm thread for NEXT time (e.g. "下次跟我说说…"). Do NOT re-greet them, do NOT say the lesson is over, and do NOT give a summary or score.`;
+      // First beat of the close: START winding down, but leave the door open. The
+      // learner still gets to reply — ending on the teacher's line felt like a
+      // door slamming.
+      return `Start winding down NATURALLY: ${bp.exitStrategy} Refer back to something you actually talked about and leave a warm thread for next time (e.g. "下次跟我说说…"). Still leave them an easy opening to reply — this is the beginning of a goodbye, not the end of one. Do NOT re-greet them, do NOT say the lesson is over, and do NOT give a summary or score.`;
+    case 'farewell':
+      // Second beat: they answered the wind-down. Close warmly and briefly.
+      return 'They just replied to your goodbye. Answer warmly and BRIEFLY (one short sentence), then close for real — e.g. 好，明天见！ Do NOT ask a new question, do NOT start a new topic, and do NOT summarize.';
     default:
       return '';
   }
@@ -202,7 +233,12 @@ function executorSystem({ blueprint, stage = 'explore', knownWords = [], profile
     // WORDING (Workstream C): the 9.7B model tends to reach for literary flourish.
     // Steer it hard toward plain, reusable, learner-first language.
     'WORDING: use SIMPLE, common, everyday words and short natural sentences. Avoid literary, idiomatic, or stylistic flourish and rare vocabulary unless the learner is clearly advanced. Clarity and reusability beat sounding impressive — say things the way a kind teacher would to a beginner.',
-    'Comprehensible input: build turns almost entirely from KNOWN words; introduce at most one new idea per turn and make its meaning obvious from context.',
+    // Comprehensible input, but NOT a straitjacket. The UI shows full pinyin and an
+    // English translation for every turn, so one or two unfamiliar words are
+    // readable — and insisting on a purely known-word vocabulary made the teacher
+    // sound stilted and unnatural. Ground the sentence in known words; let the
+    // natural word be the natural word.
+    'Comprehensible input: build turns mostly from words they know, but do NOT contort a sentence to avoid an unknown word. One or two unfamiliar words per turn is fine and welcome when it makes the Chinese sound natural — say it the way a native speaker actually would, and let context carry the meaning.',
     // Turn size scales with measured level (conversationProfile) — a beginner gets
     // 1-2 short sentences; an advancing learner gets longer, richer turns.
     `${(profile?.turnDirective) || 'Keep every turn SHORT (1–2 sentences).'} Model corrections naturally instead of lecturing. Stay fully in character.`,

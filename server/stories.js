@@ -11,7 +11,8 @@
 import { db, getModel, setModel } from './db.js';
 import { hasApiKey, completeJson } from './anthropic.js';
 import { chat, available as qwenAvailable } from './qwen.js';
-import { knownWordIds, newCandidates } from './planner.js';
+import { knownWordIds, introducedWordIds, newCandidates } from './planner.js';
+import { coreSet } from './vocabguard.js';
 import { conversationProfile } from './level.js';
 import { scriptLevel, updateMastery } from './learner.js';
 import { getInterests } from './interests.js';
@@ -23,12 +24,25 @@ import { storyThrottle } from './spend.js';
 
 const CJK = /[一-鿿]/;
 
+// The vocabulary a story may draw on. Deliberately WIDER than knownWordIds():
+// "known" means consolidated (stage>=2 / in review), which a new learner reaches
+// only after days — so gating stories on it meant they never appeared, which is
+// the opposite of using words as soon as you meet them. Anything INTRODUCED (met
+// in a lesson or conversation) counts, plus the core function words every learner
+// picks up from the guided frames.
 function knownRows(limit = 500) {
-  const ids = [...knownWordIds()];
-  if (!ids.length) return [];
-  const ph = ids.map(() => '?').join(',');
-  return db().prepare(`SELECT id, hanzi, pinyin, gloss, english, freq_rank FROM words
-    WHERE id IN (${ph}) ORDER BY COALESCE(freq_rank, 999999) ASC LIMIT ${limit}`).all(...ids);
+  const ids = [...new Set([...knownWordIds(), ...introducedWordIds()])];
+  const rows = ids.length
+    ? db().prepare(`SELECT id, hanzi, pinyin, gloss, english, freq_rank FROM words
+        WHERE id IN (${ids.map(() => '?').join(',')})
+        ORDER BY COALESCE(freq_rank, 999999) ASC LIMIT ${limit}`).all(...ids)
+    : [];
+  const have = new Set(rows.map(r => r.hanzi));
+  const core = [...coreSet(1)].filter(h => !have.has(h));
+  if (!core.length) return rows;
+  const coreRows = db().prepare(`SELECT id, hanzi, pinyin, gloss, english, freq_rank FROM words
+    WHERE hanzi IN (${core.map(() => '?').join(',')})`).all(...core);
+  return [...rows, ...coreRows].slice(0, limit);
 }
 
 // Up to `n` stretch words: the planner's best next candidates (comprehensible,
@@ -61,7 +75,7 @@ async function generateStory() {
   const prof = conversationProfile();
   const sentences = 4 + Math.round(prof.t * 6);              // 4 → 10 with progression
   const known = knownRows().map(r => r.hanzi);
-  if (known.length < 8) return null;                          // too early for stories
+  if (known.length < 8) return null;                          // genuinely nothing to build from
   const stretch = stretchWords(known.length < 40 ? 2 : 3);
   const interests = getInterests().slice(0, 3).map(i => i.topic).filter(Boolean);
   const topic = interests.length ? interests[Math.floor(Math.random() * interests.length)] : 'everyday life';
@@ -187,8 +201,14 @@ function assembleFallback() {
 // When metered spend is running hot, story FREQUENCY is reduced — a fresh
 // generation is rate-limited and the existing story is reused instead. Story
 // quality and the model used are never downgraded.
+// Bumped whenever the story format or vocabulary rules change, so a story cached
+// under older rules (e.g. one that leaked traditional characters) is discarded
+// rather than shown forever.
+const STORY_VERSION = 2;
+
 export async function getStory({ fresh = false } = {}) {
-  const cur = getModel('current_story', null);
+  const raw = getModel('current_story', null);
+  const cur = raw && raw.v === STORY_VERSION ? raw : null;
   if (!fresh && cur && !cur.completed) return cur;
 
   if (fresh && cur) {
@@ -203,7 +223,7 @@ export async function getStory({ fresh = false } = {}) {
   }
 
   const story = (await generateStory()) || assembleFallback();
-  if (story) setModel('current_story', story);
+  if (story) { story.v = STORY_VERSION; setModel('current_story', story); }
   return story;
 }
 

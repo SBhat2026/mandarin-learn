@@ -19,10 +19,11 @@ import { buildExercise, cleanGloss } from './exercises.js';
 import { weakTone, buildToneDrill } from './tone.js';
 import { liveCompletion, computeCalibration } from './momentum.js';
 import { currentRung, rungKnobs } from './rung.js';
-import { allowedSet, buildFrameTurn, groundTokens, beginnerNewWords, vocabToken, validateTurn, segment } from './vocabguard.js';
+import { allowedSet, buildFrameTurn, groundTokens, beginnerNewWords, vocabToken, validateTurn, segment, coreSet, shortGloss, isNamable } from './vocabguard.js';
 import { classifyIntent, regroundReply, expressionGapReply } from './intent.js';
 import { graphNeighbors, graphSteer, nextConcepts } from './graphwalk.js';
 import { conversationProfile } from './level.js';
+import { pinyinForHanzi, glossForHanzi } from './pronunciation.js';
 
 function genId() {
   return 'c_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -69,6 +70,12 @@ function conversationMemory(transcript = []) {
 const ladderKey = (id) => `ladder:${id}`;
 const getLadder = (id) => getModel(ladderKey(id), null);
 const setLadder = (id, s) => setModel(ladderKey(id), s);
+// What the free-rung teacher has already been ON about, per conversation.
+const topicsKey = (id) => `topics:${id}`;
+
+// Absolute exchange ceiling for a free conversation, whatever the blueprint budget
+// says. Past this it is no longer a conversation, it is a treadmill.
+const FREE_CEILING = 14;
 
 // Seed a small, GRAPH-CONNECTED cluster of concrete/picturable words for a guided
 // session — each word reinforces the last (shared topic/character/co-occurrence) so the
@@ -78,27 +85,85 @@ const setLadder = (id, s) => setModel(ladderKey(id), s);
 function seedSessionWords(plan) {
   const introduced = introducedWordIds();
   const out = [], seen = new Set();
+  // ROTATE the callback. Carrying the first word forward every time meant every
+  // session opened on the same noun ("这是车。" three days running), which reads as
+  // being stuck rather than as continuity.
   const callback = getModel('last_session_words', []) || [];
+  const spin = getModel('callback_spin', 0) || 0;
+  if (callback.length) setModel('callback_spin', (spin + 1) % Math.max(1, callback.length));
+  const rotated = callback.length ? [callback[spin % callback.length]] : [];
   let anchorId = null;
-  for (const h of callback.slice(0, 1)) {
+  for (const h of rotated) {
     const row = db().prepare('SELECT id FROM words WHERE hanzi=?').get(h);
     const tk = row && vocabToken(row.id);
     if (tk && !seen.has(tk.hanzi)) { out.push({ ...tk, isNew: false, callback: true }); seen.add(tk.hanzi); anchorId = row.id; }
   }
-  // Keep the set SMALL (≤3) so each new word recurs several times (within-session
-  // spacing); prefer words graph-connected to the anchor (or to each other).
-  for (const w of connectedBeginnerCluster(introduced, anchorId, 3 - out.length)) {
+  // Start with TWO words, not three: the arc's `grow` beat brings a third in
+  // mid-conversation (see growSessionWord), so the session opens small and then
+  // visibly moves somewhere instead of circling a fixed set from the first turn.
+  // Also guard against repeating YESTERDAY's meaning under a different word (钱 then
+  // 金钱, both "money") — that reads as the app going in circles.
+  const recent = recentlyTaught();
+  for (const w of connectedBeginnerCluster(introduced, anchorId, 8)) {
     if (seen.has(w.hanzi)) continue;
+    if (tooSimilar(w, out)) continue;                             // never 车 + 火车 in one sitting
+    if (tooSimilar(w, recent, { chars: false })) continue;        // nor last week's meaning again
     out.push({ ...w, isNew: true }); seen.add(w.hanzi);
-    if (out.length >= 3) break;
+    if (out.length >= 2) break;
   }
+  // Last resort: the plan's focal word — but never a function word. The planner's
+  // focal can be a pronoun, and "这是你。/ 你有我吗？" is the kind of sentence that
+  // makes the whole thing look broken.
   if (out.length < 2 && plan.focal?.wordId) {
     const tk = vocabToken(plan.focal.wordId);
-    if (tk && !seen.has(tk.hanzi)) out.push({ ...tk, isNew: true });
+    if (tk && !seen.has(tk.hanzi) && !coreSet(1).has(tk.hanzi)) out.push({ ...tk, isNew: true });
   }
-  const picked = out.slice(0, 3);
+  const picked = out.slice(0, 2);
   for (const w of picked) if (w.wordId) createCardsForWord(w.wordId);
   return picked;
+}
+
+// Mid-conversation growth: ONE further word, graph-connected to what's already in
+// play and NOT already in the session. This is what makes a guided conversation
+// travel — without it the whole arc is spent on the words chosen at turn zero.
+function growSessionWord(sessionWords) {
+  const introduced = introducedWordIds();
+  const anchorId = sessionWords.find(w => w.wordId)?.wordId ?? null;
+  const recent = recentlyTaught();
+  for (const cand of connectedBeginnerCluster(introduced, anchorId, 10)) {
+    if (tooSimilar(cand, sessionWords)) continue;
+    if (tooSimilar(cand, recent, { chars: false })) continue;
+    if (cand.wordId) createCardsForWord(cand.wordId);
+    return { ...cand, isNew: true };
+  }
+  return null;
+}
+
+// Graph adjacency happily returns a near-synonym (车 → 汽车, both "car"), which
+// makes the session look like it moved when it didn't — and teaching two words for
+// one meaning in one sitting is actively confusing at this level. Reject anything
+// that repeats a meaning or a character already in play.
+// The words taught recently, as comparable tokens. The planner already refuses to
+// re-introduce a word, but nothing stopped it teaching a SYNONYM of one (钱 on Monday,
+// 金钱 on Wednesday), which reads as the app going in circles.
+function recentlyTaught(limit = 30) {
+  return db().prepare(`SELECT item_id FROM cards WHERE item_type='word'
+    ORDER BY id DESC LIMIT ?`).all(limit)
+    .map(r => vocabToken(r.item_id)).filter(Boolean);
+}
+
+// `chars: true` also rejects sharing a character (车 vs 火车) — right for words in
+// the SAME sitting, too aggressive across weeks of history, where only a repeated
+// MEANING is the problem.
+function tooSimilar(cand, others, { chars = true } = {}) {
+  const head = (g) => String(g || '').toLowerCase().split(/[;,(]/)[0].trim();
+  for (const w of others) {
+    if (!w) continue;
+    if (w.hanzi === cand.hanzi) return true;
+    if (head(w.gloss) && head(w.gloss) === head(cand.gloss)) return true;
+    if (chars) for (const c of cand.hanzi) if (w.hanzi.includes(c)) return true;
+  }
+  return false;
 }
 
 // A connected cluster of picturable beginner nouns: start from the best picturable word
@@ -107,7 +172,10 @@ function seedSessionWords(plan) {
 // offers no picturable neighbour, so decodability is never sacrificed for connectedness.
 function connectedBeginnerCluster(introduced, anchorId, n = 3) {
   if (n <= 0) return [];
-  const pool = beginnerNewWords(10, { introduced });          // picturable nouns, ranked
+  // A wide pool matters: the callers filter it hard (no synonyms, no shared
+  // characters, nothing taught recently), and a thin pool made them fall through to
+  // whatever the planner's focal happened to be.
+  const pool = beginnerNewWords(30, { introduced });          // picturable nouns, ranked
   if (!pool.length) return [];
   const byId = new Map(pool.map(p => [p.id, p]));
   const chosen = [];
@@ -177,6 +245,7 @@ export async function startConversation() {
     plan.targetVocab = sessionWords.map(w => ({ wordId: w.wordId, hanzi: w.hanzi, pinyin: w.pinyin, gloss: w.gloss, role: 'focal' }));
     setLadder(id, {
       rung, turnIndex: 0,
+      beatIdx: 0, usedFrames: [], stuck: 0,
       sessionWords, introducedHanzi: sessionWords.map(w => w.hanzi),
       microGoal: plan.capability?.name || 'name and count a few everyday things',
       lastTeacherHanzi: '',
@@ -214,54 +283,93 @@ export async function conversationTurn({ id, userText = '', history = [], forceW
 }
 
 // ── Guided rungs (0/1): frame-built, validated, interlinear, never-strand ────
+// A guided session follows an ARC, not a frame carousel. Each beat has a different
+// job, and one beat (`grow`) brings in a brand-new word mid-conversation, so the
+// talk travels instead of grinding the same two nouns through every template until
+// a turn counter runs out. The arc reaching its end IS the ending — that's what
+// makes the close feel earned rather than abrupt.
+const ARC = ['meet', 'identify', 'relate', 'grow', 'use', 'combine', 'win', 'farewell'];
+const HARD_CEILING = 10;                    // absolute backstop, arc normally ends first
+
 function guidedTurn({ id, s, ladder, userText, forceWrap }) {
   const knobs = rungKnobs(ladder.rung);
   const { plan } = s;
-  const sessionWords = ladder.sessionWords || [];
+  let sessionWords = ladder.sessionWords || [];
   const opening = !userText;
   const exchanges = s.exchanges + (opening ? 0 : 1);
   const intent = opening ? { kind: 'opening' } : classifyIntent(userText, { prevTeacherHanzi: ladder.lastTeacherHanzi });
 
-  // Completion: a short, bounded guided arc. Wrap on a recombination "win" once the
-  // learner has met and reused the words a few times (or a hard ceiling).
-  const [minEx, maxEx] = [4, 7];
-  const wrap = forceWrap || exchanges >= maxEx || (exchanges >= minEx && intent.kind === 'normal' && ladder.turnIndex >= minEx);
+  // Where we are in the arc. A detour (confusion / "how do I say" / English meta)
+  // does NOT consume a beat — but repeating the same beat three times does, so a
+  // learner who keeps stalling still moves forward rather than looping forever.
+  let beatIdx = ladder.beatIdx ?? 0;
+  let stuck = ladder.stuck ?? 0;
+  const detour = !opening && intent.kind !== 'normal';
+  if (detour) stuck += 1; else stuck = 0;
+  // The learner asked to stop → say goodbye now, properly. The arc's remaining
+  // beats are not worth trapping someone in.
+  if (forceWrap) beatIdx = ARC.indexOf('farewell');
+  if (exchanges >= HARD_CEILING) beatIdx = Math.max(beatIdx, ARC.indexOf('win'));
+  const beat = ARC[Math.min(beatIdx, ARC.length - 1)];
+  const usedFrames = ladder.usedFrames || [];
+  const wrap = beat === 'farewell';
 
-  let reply;
-  if (wrap) {
+  let reply, newWord = null;
+  const frameArgs = { rung: ladder.rung, sessionWords, exclude: usedFrames };
+
+  if (beat === 'farewell') {
+    reply = guidedFarewell(sessionWords, ladder);
+    setModel('last_session_words', (ladder.introducedHanzi || []).slice(0, 3));   // honest callback seed
+  } else if (beat === 'win') {
     reply = recombinationWin(sessionWords, ladder);
-    setModel('last_session_words', ladder.introducedHanzi.slice(0, 3));   // honest callback seed for next time
-  } else if (opening) {
-    const frame = buildFrameTurn({ rung: ladder.rung, sessionWords, turnIndex: 0 });
-    reply = {
-      ...frame,
-      intro: openingLine(sessionWords),
-      newWords: sessionWords.map(meetWord),
-    };
-  } else if (intent.kind === 'confused' || intent.kind === 'stall') {
-    reply = regroundReply({ prevTeacherHanzi: ladder.lastTeacherHanzi, sessionWords });
-    // Still move forward: re-ask a simple frame after re-grounding.
-    const frame = buildFrameTurn({ rung: ladder.rung, sessionWords, turnIndex: ladder.turnIndex, prefer: 'this-is-q' });
-    reply.followFrame = frame;
-    reply.choices = frame.choices;
-  } else if (intent.kind === 'howdoisay') {
+  } else if (detour && intent.kind === 'howdoisay') {
     const gap = expressionGapReply(intent.phrase);
-    // Offline: nudge circumlocution and offer a session word to try — never stranded.
     const target = sessionWords[0];
     reply = gap.tokens === null && gap.needsModel
       ? { hanzi: '用你会的词试试看，比如：', pinyin: 'Yòng nǐ huì de cí shì shi kàn, bǐrú:', english: 'Try with words you know, like:',
           tokens: groundTokens('用你会的词试试看。', {}), choices: [{ hanzi: `这是${target?.hanzi || '猫'}。`, pinyin: '', gloss: `This is ${target?.gloss || ''}.` }] }
       : { ...gap, tokens: gap.tokens || groundTokens(gap.hanzi, {}) };
-  } else if (intent.kind === 'meta') {
+    reply.followFrame = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex });
+    reply.choices = reply.followFrame?.choices || reply.choices;
+  } else if (detour && intent.kind === 'meta') {
     reply = { hanzi: '好问题！我们先用中文说说看。', pinyin: 'Hǎo wèntí! Wǒmen xiān yòng zhōngwén shuō shuo kàn.', english: "Good question! Let's try it in Chinese first.",
       tokens: groundTokens('我们用中文说说看。', {}) };
-    const frame = buildFrameTurn({ rung: ladder.rung, sessionWords, turnIndex: ladder.turnIndex });
-    reply.followFrame = frame; reply.choices = frame.choices;
+    reply.followFrame = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex });
+    reply.choices = reply.followFrame?.choices || [];
+  } else if (detour) {                       // confused / stall
+    reply = regroundReply({ prevTeacherHanzi: ladder.lastTeacherHanzi, sessionWords });
+    const frame = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex, prefer: 'this-is-q' });
+    reply.followFrame = frame;
+    reply.choices = frame?.choices || reply.choices;
+  } else if (beat === 'meet') {
+    reply = {
+      ...buildFrameTurn({ ...frameArgs, turnIndex: 0, prefer: 'this-is' }),
+      intro: openingLine(sessionWords),
+      newWords: sessionWords.map(meetWord),
+    };
+  } else if (beat === 'grow') {
+    // The turn that moves the conversation somewhere new.
+    newWord = growSessionWord(sessionWords);
+    if (newWord) {
+      sessionWords = [...sessionWords, newWord];
+      reply = {
+        ...buildFrameTurn({ rung: ladder.rung, sessionWords, turnIndex: 0, focusHanzi: newWord.hanzi, prefer: 'this-is', exclude: [] }),
+        intro: { hanzi: '还有一个词。', pinyin: 'Hái yǒu yí ge cí.', english: "Here's one more." },
+        newWords: [meetWord(newWord)],
+      };
+    } else {
+      reply = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1 });
+    }
+  } else if (beat === 'combine') {
+    // Two of today's words in one sentence — the first thing that sounds like a
+    // real sentence rather than a drill.
+    reply = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1, pair: true })
+      || buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1 });
   } else {
-    // Normal: advance with the next frame, rotating focus so every word recurs
-    // (within-session spacing — extra #1).
-    const focusHanzi = sessionWords.length ? sessionWords[(ladder.turnIndex) % sessionWords.length].hanzi : null;
-    reply = buildFrameTurn({ rung: ladder.rung, sessionWords, turnIndex: ladder.turnIndex + 1, focusHanzi });
+    // identify / use / relate: rotate focus so each word recurs (within-session
+    // spacing) but never repeat a frame the session already used.
+    const focus = sessionWords.length ? sessionWords[(beatIdx + 1) % sessionWords.length] : null;
+    reply = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1, focusHanzi: focus?.hanzi });
   }
 
   // Ensure every teacher bubble is grounded word-by-word (§1.3), fade English per rung.
@@ -269,27 +377,88 @@ function guidedTurn({ id, s, ladder, userText, forceWrap }) {
   if (reply.followFrame) reply.followFrame.tokens = fadeTokens(reply.followFrame.tokens, knobs);
 
   const lastHanzi = (reply.followFrame?.hanzi) || reply.hanzi;
-  setLadder(id, { ...ladder, turnIndex: ladder.turnIndex + 1, lastTeacherHanzi: lastHanzi });
+  const spentFrame = reply.frameId || reply.followFrame?.frameId;
+  // Advance the arc unless this was a detour we're absorbing (3 detours in a row
+  // advances anyway — never stuck on one beat).
+  const advance = !detour || stuck >= 3;
+  setLadder(id, {
+    ...ladder,
+    sessionWords,
+    introducedHanzi: newWord ? [...(ladder.introducedHanzi || []), newWord.hanzi] : ladder.introducedHanzi,
+    turnIndex: ladder.turnIndex + 1,
+    beatIdx: advance ? Math.min(beatIdx + 1, ARC.length - 1) : beatIdx,
+    stuck: advance ? 0 : stuck,
+    usedFrames: spentFrame ? [...usedFrames, spentFrame].slice(-8) : usedFrames,
+    lastTeacherHanzi: lastHanzi,
+  });
+  // A word introduced mid-arc must join the plan's targetVocab, or post-hoc
+  // scheduling (conversation.js) would never review the word we just taught.
+  if (newWord?.wordId) {
+    plan.targetVocab = [...(plan.targetVocab || []),
+      { wordId: newWord.wordId, hanzi: newWord.hanzi, pinyin: newWord.pinyin, gloss: newWord.gloss, role: 'focal' }];
+    db().prepare('UPDATE conversation_sessions SET plan_json=? WHERE id=?').run(JSON.stringify(plan), id);
+  }
   db().prepare(`UPDATE conversation_sessions SET stage='guided', exchanges=?, updated=datetime('now') WHERE id=?`).run(exchanges, id);
 
   const used = detectUsed({ hanzi: userText }, plan.targetVocab || []);
   return {
     ...reply,
     rung: ladder.rung, knobs, microGoal: ladder.microGoal,
-    used, stage: 'guided', shouldWrap: !!wrap, wrapReason: wrap ? 'guided-complete' : null,
+    used, stage: 'guided', shouldWrap: !!wrap, wrapReason: wrap ? 'arc-complete' : null,
+    closing: !wrap && beat === 'win',
+    beat,
     guided: true, choices: knobs.choices ? (reply.choices || []) : [],
   };
 }
 
 // The score-free "win": present a slightly bigger sentence built from TODAY's words
 // and invite the learner to say it — something they couldn't at the start (extra #5).
+// A PAIR frame is the real payoff: two words they met today in one sentence.
 function recombinationWin(sessionWords, ladder) {
-  const frame = buildFrameTurn({ rung: ladder.rung, sessionWords, turnIndex: 0, prefer: ladder.rung >= 1 ? 'i-like' : 'i-have-num', num: 2 });
+  // Centre it on the word they met most recently and avoid the frame the `combine`
+  // beat just used, so the payoff is a NEW bigger sentence rather than an echo. Not
+  // every word can carry a two-word sentence (you don't "like" a body part), so try
+  // each word as the focus until one actually yields a pair frame.
+  const args = { rung: ladder.rung, sessionWords, turnIndex: 1, exclude: ladder.usedFrames || [] };
+  const order = [...sessionWords].reverse();
+  let frame = null;
+  for (const w of order) {
+    const f = buildFrameTurn({ ...args, focusHanzi: w.hanzi, pair: true });
+    if (f?.frameId && f.hanzi.includes(w.hanzi) && /and|or/.test(f.english || '')) { frame = f; break; }
+  }
+  frame = frame
+    || buildFrameTurn({ ...args, focusHanzi: order[0]?.hanzi })
+    || buildFrameTurn({ rung: ladder.rung, sessionWords, turnIndex: 0, prefer: 'i-like' });
+  // The payoff must not be the sentence they just heard.
+  if (frame && frame.hanzi === ladder.lastTeacherHanzi) {
+    frame = buildFrameTurn({ rung: ladder.rung, sessionWords, turnIndex: 0, focusHanzi: order[0]?.hanzi, prefer: 'i-like' }) || frame;
+  }
   return {
     ...frame,
     intro: { hanzi: '你看，你现在能说了！', pinyin: 'Nǐ kàn, nǐ xiànzài néng shuō le!', english: 'Look — you can say it now!' },
-    outro: { hanzi: '很好，明天再聊。', pinyin: 'Hěn hǎo, míngtiān zài liáo.', english: 'Great — talk tomorrow.' },
+    // No outro here: the goodbye is a SEPARATE beat, after they've had their turn.
     invite: true,
+  };
+}
+
+// The end of the arc: name what they actually did today (the words they met — not a
+// score, not a summary), then leave one concrete thread for next time. Deterministic,
+// so a conversation always has an ending even when no model is reachable.
+function guidedFarewell(sessionWords, ladder = {}) {
+  const met = sessionWords.filter(w => w.isNew);
+  const w = met[met.length - 1] || sessionWords[0];
+  const list = met.slice(0, 3).map(x => x.gloss).filter(Boolean).join(', ');
+  return {
+    // Built only from core whitelist words, so every token is glossable whatever
+    // the learner's vocabulary state.
+    hanzi: '说得好！明天再见。',
+    pinyin: 'Shuō de hǎo! Míngtiān zàijiàn.',
+    english: list ? `Nicely said — today you can say ${list}. See you tomorrow.` : 'Nicely said! See you tomorrow.',
+    outro: w ? {
+      hanzi: `下次我们再说说${w.hanzi}。`,
+      pinyin: `Xià cì wǒmen zài shuō shuo ${w.pinyin}.`,
+      english: `Next time let's talk more about ${w.gloss}.`,
+    } : null,
   };
 }
 
@@ -305,6 +474,13 @@ function fadeTokens(tokens, knobs) {
   return tokens;
 }
 
+// Content words (non function-word segments) in a teacher turn — the rough "what
+// this turn was ABOUT". Used to notice the model circling the same subject.
+function contentWords(hanzi) {
+  const core = coreSet(2);
+  return segment(hanzi || '').filter(seg => seg.length >= 1 && !core.has(seg) && !/[。，？！、：；·]/.test(seg));
+}
+
 // ── Free rung (2): the existing Director-driven executor conversation ────────
 async function freeTurn({ id, s, userText, history, forceWrap, extWrap }) {
   const { plan, blueprint } = s;
@@ -314,12 +490,34 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap }) {
   const soFar = [...history];
   if (userText && !history.some(m => m.role === 'user' && (m.content === userText || m.hanzi === userText))) soFar.push({ role: 'user', content: userText });
   const completion = liveCompletion(soFar, blueprint, plan, exchanges);
-  const shouldWrap = forceWrap || extWrap || completion.shouldWrap;
+  // An absolute ceiling independent of the blueprint budget: measured level scales
+  // the budget upward, and a conversation that has run this long has stopped being
+  // a conversation. Without it, a drifting chat had no guaranteed end.
+  const overrun = exchanges >= FREE_CEILING;
+  const wantsWrap = forceWrap || extWrap || overrun || completion.shouldWrap;
+  // Two-beat close: the first wrap turn winds down but leaves the learner a reply;
+  // only the turn AFTER that actually ends the conversation.
+  const alreadyClosing = prevStage === 'closing';
+  const shouldWrap = alreadyClosing;
+
+  // The final beat is built in CODE, not asked of the model. A small local model
+  // asked to "close for real" would often open a new topic instead, which is why
+  // conversations never actually ended. This one always does, and it names
+  // something they really said.
+  if (alreadyClosing || forceWrap) {
+    const reply = freeFarewell(soFar, plan);
+    db().prepare(`UPDATE conversation_sessions SET stage='wrap', exchanges=?, updated=datetime('now') WHERE id=?`).run(exchanges, id);
+    return { ...reply, tokens: groundTokens(reply.hanzi, {}), rung: 2, knobs: rungKnobs(2),
+      used: detectUsed(reply, plan.targetVocab || []), stage: 'farewell', shouldWrap: true,
+      closing: false, wrapReason: completion.reason || 'closed', inlineRep: null, excursion: null,
+      audioFirst: false, newWords: [] };
+  }
 
   const calibration = computeCalibration(soFar);
   blueprint._calibration = calibration;
-  let stage = conversationStage({ exchanges, budget: blueprint.budget, shouldWrap });
-  if (!shouldWrap) {
+  let stage = conversationStage({ exchanges, budget: blueprint.budget, shouldWrap: wantsWrap });
+  if (alreadyClosing) stage = 'farewell';
+  if (!wantsWrap) {
     if (stage === 'introduce' && calibration <= -0.4) stage = 'explore';
     else if (stage === 'explore' && calibration >= 0.5 && exchanges >= 2) stage = 'introduce';
   }
@@ -331,29 +529,73 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap }) {
   const steer = graphSteer(inPlay, { known: knownWordIds(), introduced: introducedWordIds() });
   const memory = conversationMemory(soFar);
 
+  // ANTI-FIXATION. A 9.7B model given a short vocabulary and a "stay on the
+  // learner's level" instruction will happily ask about the same two nouns for
+  // fifteen turns. So we track what the teacher has already been ON about this
+  // conversation and tell it, explicitly, what not to re-litigate — plus one
+  // concrete adjacent concept to move toward.
+  const spent = getModel(topicsKey(id), []) || [];
+  const ideas = nextConcepts(inPlay, { known: knownWordIds(), introduced: introducedWordIds(), limit: 4 });
+  const freshIdea = [...(ideas.reuse || []), ...(ideas.grow || [])].find(c => !spent.includes(c.hanzi));
+  const antiRepeat = spent.length
+    ? `ALREADY COVERED this conversation: ${spent.slice(-8).join(' ')}. Do NOT ask about these again and do NOT build this turn around them — you have already made that point. Move on to something adjacent.`
+    : '';
+
   const prof = conversationProfile();
   const converseArgs = {
     blueprint, stage, history, userText, graphSteer: steer, conversationMemory: memory,
     knownWords: knownStrings(), profileDigest: profileForPrompt(), scriptDirective: plan.scriptDirective,
     profile: prof,
+    extraDirective: [antiRepeat,
+      freshIdea ? `A natural next thing to bring up (only if it fits): ${freshIdea.hanzi} (${freshIdea.gloss || ''}).` : '',
+    ].filter(Boolean).join('\n'),
   };
   let reply = await laoshiConverse(converseArgs);
 
-  // Comprehensible-input ENFORCEMENT (not just logging): a turn built on words the
-  // learner can't decode gets ONE regeneration naming the violations. If the second
-  // attempt still violates, keep whichever attempt violates less — the interlinear
-  // grounding glosses the leak so the learner is never stranded.
+  // Comprehensible input with SLACK. Every free-rung turn is shown with full pinyin
+  // and an English translation, so a couple of unfamiliar words are readable — and
+  // demanding a purely known-word vocabulary made the teacher sound stilted. So we
+  // tolerate a small number of unknown content words and only regenerate when a turn
+  // is genuinely dense with them (past that, it stops being comprehensible input).
   const allowed = allowedSet({ rung: 2, sessionWords: plan.targetVocab || [] });
-  if (reply.hanzi) {
-    const v1 = validateTurn(reply.hanzi, allowed);
-    if (!v1.ok) {
-      const repaired = await laoshiConverse({ ...converseArgs,
-        extraDirective: `REPAIR: your previous draft used words the learner cannot decode yet: ${v1.violations.join(' ')}. Say the same thing again using ONLY the KNOWN words listed above (plus core function words). Simplify rather than substitute another rare word.` });
-      const v2 = repaired.hanzi ? validateTurn(repaired.hanzi, allowed) : { ok: false, violations: v1.violations.concat('∅') };
-      if (v2.ok || v2.violations.length < v1.violations.length) reply = repaired;
-      if (!v2.ok) console.log(`[vocabguard] rung2 out-of-set after repair: ${(v2.ok ? [] : v2.violations).join(' ')} in "${reply.hanzi}"`);
+  const UNKNOWN_TOLERANCE = 2;
+  let unknown = reply.hanzi ? validateTurn(reply.hanzi, allowed).violations : [];
+
+  // ONE regeneration slot per turn, whatever is wrong with the draft — too many
+  // unmet words, or the same subject as the last few turns. A local 9.7B takes
+  // ~30s a call, so stacking a second retry on top of the repair pass is how a
+  // turn ends up taking three minutes.
+  const said = contentWords(reply.hanzi);
+  const recycled = said.length > 0 && said.every(w => spent.includes(w));
+  const tooDense = unknown.length > UNKNOWN_TOLERANCE;
+  if (!wantsWrap && (recycled || tooDense)) {
+    const why = [
+      tooDense ? `Your draft leaned on too many words this learner has not met (${unknown.join(' ')}). Say the same thing more simply — keep at most one or two of them.` : '',
+      recycled ? `Your draft was about ${said.join(' ')} again — the same subject as your last turns. Change what you are talking about: react to what they just said and go somewhere new${freshIdea ? ` (e.g. ${freshIdea.hanzi})` : ''}.` : '',
+    ].filter(Boolean).join(' ');
+    const retry = await laoshiConverse({ ...converseArgs, extraDirective: `${converseArgs.extraDirective}\nREVISE: ${why} Stay natural; do not write a robotic sentence.` });
+    if (retry.hanzi) {
+      const v2 = validateTurn(retry.hanzi, allowed);
+      const stillRecycled = contentWords(retry.hanzi).every(w => spent.includes(w));
+      if (v2.violations.length <= unknown.length && !(recycled && stillRecycled)) { reply = retry; unknown = v2.violations; }
     }
+    if (unknown.length > UNKNOWN_TOLERANCE) console.log(`[vocabguard] rung2 still dense: ${unknown.join(' ')} in "${reply.hanzi}"`);
   }
+
+  // NEVER STRAND: a model that returns nothing (context overrun, timeout, a bad
+  // JSON turn) must not surface as an empty bubble the learner can only stare at.
+  // Fall back to a grounded frame turn built from the plan — the same machinery the
+  // guided rung uses — so the conversation always has a next line.
+  if (!reply.hanzi) {
+    const fallback = freeFallbackTurn(plan);
+    if (fallback) { reply = { ...fallback, note: '' }; unknown = []; }
+  }
+  // Surface whatever IS unfamiliar as glossed chips, so the slack above stays
+  // comprehensible: the learner meets the new word instead of hitting a wall.
+  const newWords = unknown.slice(0, 3).map(h => vocabToken(
+    db().prepare('SELECT id FROM words WHERE hanzi=?').get(h)?.id) || {
+      hanzi: h, pinyin: pinyinForHanzi(h), gloss: cleanGloss({ gloss: glossForHanzi(h) }), isNew: true })
+    .filter(Boolean).map(w => ({ ...w, isNew: true }));
   const used = detectUsed(reply, plan.targetVocab || []);
 
   // Interlinear (reveal mode) still grounds the sentence word-by-word so a tap reveals
@@ -361,7 +603,9 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap }) {
   const newSet = new Set((plan.targetVocab || []).map(v => v.hanzi));
   const tokens = reply.hanzi ? groundTokens(reply.hanzi, { newSet }) : [];
 
-  db().prepare(`UPDATE conversation_sessions SET stage=?, exchanges=?, updated=datetime('now') WHERE id=?`).run(stage, exchanges, id);
+  // Persist 'closing' (not 'wrap') so the next turn knows to deliver the farewell.
+  const persistStage = shouldWrap ? 'wrap' : (wantsWrap ? 'closing' : stage);
+  db().prepare(`UPDATE conversation_sessions SET stage=?, exchanges=?, updated=datetime('now') WHERE id=?`).run(persistStage, exchanges, id);
 
   const inlineRep = (stage === 'practice' && prevStage !== 'practice') ? buildInlineRep(plan) : null;
   const excursion = (stage === 'confirm' && prevStage !== 'confirm') ? buildExcursion(plan, blueprint) : null;
@@ -371,7 +615,54 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap }) {
   const audioFirst = !!reply.hanzi && midConversation && calibration > -0.2
     && pres.audioFirstProb > 0 && Math.random() < pres.audioFirstProb;
 
-  return { ...reply, tokens, rung: 2, knobs: rungKnobs(2), used, stage, shouldWrap, wrapReason: completion.reason, inlineRep, excursion, audioFirst };
+  if (reply.hanzi) setModel(topicsKey(id), [...spent, ...contentWords(reply.hanzi)].slice(-16));
+
+  return { ...reply, tokens, rung: 2, knobs: rungKnobs(2), used, stage, shouldWrap,
+    closing: !shouldWrap && wantsWrap,
+    wrapReason: shouldWrap ? completion.reason : null, inlineRep, excursion, audioFirst, newWords };
+}
+
+// The free rung's safety net when the model gives us nothing: a real, grounded
+// question built from the plan's own vocabulary. Deliberately simple — its job is to
+// keep the conversation alive, not to be clever.
+function freeFallbackTurn(plan) {
+  const words = (plan.targetVocab || [])
+    .map(v => (v.wordId ? vocabToken(v.wordId) : null))
+    .filter(Boolean);
+  const frame = words.length ? buildFrameTurn({ rung: 1, sessionWords: words, turnIndex: 1 }) : null;
+  if (frame) return frame;
+  return { hanzi: '今天怎么样？', pinyin: 'Jīntiān zěnmeyàng?', english: 'How was today?',
+    tokens: groundTokens('今天怎么样？', {}) };
+}
+
+// The free rung's final line, built in code. It closes on something the learner
+// actually said this conversation, so it reads as an ending to THIS talk rather
+// than a generic sign-off — and it can never wander into a new topic.
+function freeFarewell(transcript = [], plan = {}) {
+  const lookup = db().prepare('SELECT hanzi, gloss, english FROM words WHERE hanzi=?');
+  let thread = null;
+  for (let i = transcript.length - 1; i >= 0 && !thread; i--) {
+    const t = transcript[i];
+    if (t.role !== 'user') continue;
+    for (const seg of segment(t.hanzi || t.content || '')) {
+      const w = lookup.get(seg);
+      if (!w || coreSet(2).has(seg)) continue;
+      const gloss = shortGloss(w.gloss || w.english);
+      if (!isNamable(gloss)) continue;          // don't promise to discuss "to count as"
+      thread = { hanzi: seg, gloss };
+      break;
+    }
+  }
+  if (!thread) {
+    const tv = (plan.targetVocab || []).find(v => v.hanzi && isNamable(v.gloss));
+    if (tv) thread = { hanzi: tv.hanzi, gloss: tv.gloss };
+  }
+  return thread
+    ? { hanzi: `好，今天就聊到这儿。下次再说说${thread.hanzi}。明天见！`,
+        pinyin: `Hǎo, jīntiān jiù liáo dào zhèr. Xià cì zài shuō shuo ${pinyinForHanzi(thread.hanzi) || ''}. Míngtiān jiàn!`,
+        english: `OK — let's stop here today. Next time let's talk more about ${thread.gloss || thread.hanzi}. See you tomorrow!`, note: '' }
+    : { hanzi: '好，今天就聊到这儿。明天见！', pinyin: 'Hǎo, jīntiān jiù liáo dào zhèr. Míngtiān jiàn!',
+        english: "OK — let's stop here today. See you tomorrow!", note: '' };
 }
 
 // A single recognition rep on a focal/target word, wired to the real scheduler via
