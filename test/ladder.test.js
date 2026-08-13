@@ -49,7 +49,12 @@ test('a fresh zero-user opening meets its words and grounds every token', async 
   // A reader can point to the word that means "cat": it exists as its own token/newWord.
   const catMeet = opening.newWords.find(w => /cat|dog|fish|water|bird|flower/i.test(w.gloss));
   assert.ok(catMeet, 'a concrete meaning is pointable to a single word');
-  assert.ok(opening.choices.length >= 2, 'scaffolded choices are offered');
+  // Tap-to-answer choices are deliberately gone: picking a glossed chip is
+  // recognition, and it let a whole session be finished without composing anything.
+  // What replaces them is a model sentence held back until the learner asks.
+  assert.equal(opening.choices.length, 0, 'no tap-to-answer choices are offered');
+  assert.ok(opening.modelAnswer?.hanzi, 'a model sentence is available on request');
+  assert.ok(opening.modelAnswer.pinyin, 'the model sentence is readable');
 });
 
 test('across 20 guided turns, no un-glossed out-of-set content word reaches the UI', async () => {
@@ -124,13 +129,16 @@ test('the learner can ask to finish and gets a real goodbye', async () => {
   assert.match(bye.hanzi, /再见|明天/, 'and it is an actual goodbye');
 });
 
-test('confusion is re-grounded with simpler choices, never "I don\'t know"', async () => {
+test('confusion is re-grounded and always leaves a next move, never "I don\'t know"', async () => {
   setRungOverride(0);
   const s = await startConversation();
   await conversationTurn({ id: s.sessionId, userText: '' });
   const r = await conversationTurn({ id: s.sessionId, userText: "what? I'm confused" });
   assert.ok(!/i don'?t know|不知道/i.test(r.english + r.hanzi), 'never strands the learner');
-  assert.ok(r.choices.length >= 1, 'offers a next move');
+  // The next move is now a question to answer plus a model sentence they can ask to
+  // see — not a chip that answers for them.
+  assert.equal(r.choices.length, 0, 'still no tap-to-answer choices, even under confusion');
+  assert.ok(r.modelAnswer?.hanzi || /[？?]/.test(r.hanzi), 'offers a next move');
   assert.ok(r.reground || r.followFrame, 're-grounds or re-asks a simpler frame');
 });
 

@@ -6,14 +6,14 @@ existing Director/blueprint free-conversation mode and fade automatically as the
 learner's measured level rises.
 
 ## Rungs (`server/rung.js`)
-| rung | name | generation | interlinear | new/turn | choices |
+| rung | name | generation | interlinear | new/turn | model answer |
 |------|------|-----------|-------------|----------|---------|
-| 0 | guided | frames (`vocabguard`) | full (hanzi+pinyin+gloss) | 1 | always |
-| 1 | semi | hybrid | partial (drop English gloss, keep pinyin) | 2 | offered |
-| 2 | free | Director/executor (`converse.freeTurn`) | reveal (tap) | — | on request |
+| 0 | guided | frames (`vocabguard`) | full (hanzi+pinyin+gloss) | 1 | on request |
+| 1 | semi | hybrid | partial (drop English gloss, keep pinyin) | 2 | on request |
+| 2 | free | Director/executor (`converse.freeTurn`) | reveal (tap) | — | off |
 
 - **Driven by** `level.js` bands **and** a comprehension signal (`comprehensionSignal`)
-  = scaffolded-choice accuracy + listen-vs-reveal behaviour, so a beginner who barely
+  = production accuracy + listen-vs-reveal behaviour, so a beginner who barely
   *produces* can still be measured and still climb.
 - **Hysteresis**: at most one step per conversation; climbing requires comprehension
   holding (≥0.5); a level slip eases off immediately. `setRungOverride(0|1|2|null)` for
@@ -146,3 +146,71 @@ Skipping is a first-class outcome: rung 0, nothing lost. `test/placement.test.js
 Two forward tracks — 说 Speak and 读 Read — each phrased as the next thing to do, with
 the words a session will pick back up from. The numbered unit path is gone: showing a
 ladder of levels made the first thing you saw every day be how far you still had to go.
+
+---
+
+## 2026-08-13 — production instead of selection, and a strictness ladder
+
+**Tap-to-answer choices are gone.** They were the app's biggest self-deception:
+picking `这是猫` from three glossed chips exercises none of the retrieval that
+*composing* `这是猫` does, and a learner could finish an entire session — meet the
+words, hit the recombination win, get the goodbye — without ever building a sentence.
+Recognition was being counted as production, including by the ladder itself, whose
+comprehension signal was literally tap accuracy.
+
+What replaces them:
+
+- **The learner types or speaks.** Pinyin, characters, or the pinyin IME.
+- **A model sentence on request** (`reply.modelAnswer`, `rungKnobs().modelAnswer`).
+  Hidden until asked for; asking drops it into the input box, where the learner still
+  has to send it themselves. This keeps the never-strand promise without answering for
+  them.
+- **`recordProductionOutcome`** feeds the same store the tap signal used to. Strictly
+  better: automatic on every turn, and measuring composition rather than selection.
+- `classifyIntent` now recognises **pinyin as a real attempt**. `mao` used to be a
+  3-letter latin string → `stall` → re-ground, so a beginner answering correctly with
+  the only input they have was told to slow down and the arc did not advance.
+
+## Correction (`server/correction.js`)
+
+Production without correction is just error, practised. Every learner turn is graded
+deterministically (rungs 0/1 never call a model, so correction cannot need one) and the
+result is rendered under the learner's **own** bubble as a before → after, never as a
+score on the turn.
+
+Detected: script (pinyin where characters are now expected), tone-missing,
+tone-numbers, tone-wrong, `是`+adjective, measure words, `二` vs `两`.
+
+Two rules keep it honest:
+
+1. **A different tone is a different WORD unless we know what they were reaching for.**
+   `máo` is 毛. Tone errors are therefore only marked against the sentence the turn
+   actually invited (`expected`), never against a guess.
+2. **Never name characters we are not sure of.** The IME is tone-blind, so
+   `resolveMeant()` returns a confidence flag and every correction that names hanzi is
+   gated on it. Silence beats being confidently wrong.
+
+At rung 2 the correction becomes a `recastDirective` naming the exact error — told only
+to "correct naturally", the model invents a different mistake to fix, or fixes nothing.
+
+## The strictness ladder (`strictness(t, rung)`)
+
+The one thing the learner should feel getting harder. A beginner typing `mao` has done
+something real; an advanced learner typing `mao` for a word they have known for months
+is avoiding the work, and letting it pass is how someone ends up fluent in pinyin and
+illiterate in Chinese.
+
+| band | when | script | tones | grammar |
+|---|---|---|---|---|
+| gentle | rung 0, or t < 0.15 | anything | ignored | not policed |
+| shaping | t < 0.4 | anything | noted (soft) | corrected |
+| firm | t < 0.7 | hanzi nudged | required | corrected |
+| exacting | t ≥ 0.7 | hanzi **required** for known words | required | corrected |
+
+The script rule only ever applies to words the learner **already knows** — being asked
+for characters you have never been shown is a wall, not rigour. The guided rung is
+gentle whatever the measured level says: scaffolding plus strictness is just
+discouragement.
+
+`test/correction.test.js`; probes `no-choices`, `model-answer`, `correction`,
+`strictness` in the level sweep.

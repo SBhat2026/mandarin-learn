@@ -44,15 +44,22 @@ const LEVELS = [
 
 // What the learner says back, per level. Deliberately imperfect — a real learner
 // mixes languages, stalls, and gets things wrong.
+// What the learner says back, per level. Each line is tagged so the probes know what
+// they are looking at:
+//   error:<kind> — a DELIBERATE mistake that must come back corrected
+//   toneless     — pinyin without tone marks; fine early, a correction later
+//   good         — unambiguously correct; must never be "corrected"
 const SCRIPTS = {
-  none:            ['', '猫', '这是猫', '好', '猫'],
-  'single-words':  ['猫', '狗', '我有猫', '好的', '水'],
-  'short-sentences': ['我有一只猫。', '我喜欢猫。', '这是我的书。', '我今天很好。', '我想喝水。'],
-  sentences:       ['我今天很累，因为我工作了很久。', '我觉得这个问题很有意思。', '我喜欢在周末看书。',
-                    '你觉得学中文难吗？', '我以前住在北京。'],
-  fluent:          ['我最近在想换工作的事，可是还没决定。', '我觉得学语言最难的是听力，不是语法。',
-                    '如果有机会，我想去中国南方旅行。', '你怎么看现在年轻人的生活压力？',
-                    '我认为这个问题没有简单的答案。'],
+  none:            [['猫', 'toneless'], ['这是猫', 'good'], ['好', ''], ['mao', 'toneless']],
+  'single-words':  [['猫', 'good'], ['mao', 'toneless'], ['我有猫', ''], ['水', 'good']],
+  'short-sentences': [['我有一只猫。', 'good'], ['我是好', 'error:shi-adjective'], ['mao', 'toneless'],
+                      ['我有一个猫', 'error:measure-word'], ['我想喝水。', 'good']],
+  sentences:       [['我今天很累，因为我工作了很久。', 'good'], ['二个人在这儿', 'error:er-liang'],
+                    ['wo xihuan kan shu', 'toneless'], ['我有一个书', 'error:measure-word'],
+                    ['我以前住在北京。', 'good']],
+  fluent:          [['我最近在想换工作的事，可是还没决定。', 'good'], ['我是很累', ''],
+                    ['wo juede zhongwen hen nan', 'toneless'], ['我有一个猫', 'error:measure-word'],
+                    ['我认为这个问题没有简单的答案。', 'good']],
 };
 const CONFUSION = "I don't understand";
 const CONFUSION_AT = 3;               // inject on this turn so never-strand is exercised
@@ -162,9 +169,13 @@ async function runLevel({ level, maxTurns, probes }) {
   const turns = [];
   const history = [];
   let userText = '';                       // the opening turn takes no input
+  let tag = '';                            // what this line is (planted error / toneless / good)
 
   for (let i = 0; i < maxTurns; i++) {
     const wasConfusion = userText === CONFUSION;
+    const plantedError = tag.startsWith('error:') ? tag.slice(6) : null;
+    const tonelessProbe = tag === 'toneless';
+    const knownGood = tag === 'good';
     const t0 = Date.now();
     let reply, error = null;
     try {
@@ -191,6 +202,7 @@ async function runLevel({ level, maxTurns, probes }) {
 
     turns.push({
       i: i + 1, userText, wasConfusion, ms, error,
+      plantedError, tonelessProbe, knownGood,
       reply: { ...reply, hanzi: visible, _main: reply.hanzi },
       introduced, groundedTokens,
       sessionNouns: [...new Set(turns.flatMap(t => t.introduced || []).concat(introduced))],
@@ -198,7 +210,8 @@ async function runLevel({ level, maxTurns, probes }) {
     if (reply.hanzi) history.push({ role: 'assistant', content: reply.hanzi });
 
     if (reply.shouldWrap) break;
-    userText = (i + 1 === CONFUSION_AT) ? CONFUSION : script[i % script.length] || script[0];
+    if (i + 1 === CONFUSION_AT) { userText = CONFUSION; tag = ''; }
+    else { const line = script[i % script.length] || script[0]; [userText, tag] = line; }
     history.push({ role: 'user', content: userText });
   }
 

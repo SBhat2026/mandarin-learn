@@ -18,7 +18,8 @@ import { capabilityMastery, pendingUnlock, markUnlockAcked } from './capabilitie
 import { buildExercise, cleanGloss } from './exercises.js';
 import { weakTone, buildToneDrill } from './tone.js';
 import { liveCompletion, computeCalibration } from './momentum.js';
-import { currentRung, rungKnobs } from './rung.js';
+import { currentRung, rungKnobs, recordProductionOutcome } from './rung.js';
+import { evaluateProduction, recastLine, recastDirective } from './correction.js';
 import { allowedSet, buildFrameTurn, groundTokens, beginnerNewWords, vocabToken, validateTurn, segment, coreSet, shortGloss, isNamable, knownHanzi } from './vocabguard.js';
 import { classifyIntent, regroundReply, expressionGapReply } from './intent.js';
 import { graphNeighbors, graphSteer, nextConcepts } from './graphwalk.js';
@@ -278,8 +279,34 @@ export async function conversationTurn({ id, userText = '', history = [], forceW
   if (!s) throw new Error('conversation not found');
   const ladder = getLadder(id);
   const rung = ladder?.rung ?? currentRung();
-  if (rung < 2 && ladder && ladder.sessionWords?.length) return guidedTurn({ id, s, ladder, userText, forceWrap });
-  return freeTurn({ id, s, userText, history, forceWrap, extWrap });
+
+  // Look at what the learner actually produced BEFORE deciding what to say back.
+  // Every turn is now composed rather than tapped, so every turn is also a chance to
+  // put a wrong tone or a missing measure word right — and the accept/repair verdict
+  // is what feeds the ladder, replacing the tap-accuracy signal that choices gave.
+  const correction = gradeProduction({ userText, ladder, rung });
+  if (correction) recordProductionOutcome({ accepted: correction.accepted, aside: correction.aside });
+
+  const reply = (rung < 2 && ladder && ladder.sessionWords?.length)
+    ? guidedTurn({ id, s, ladder, userText, forceWrap, correction })
+    : await freeTurn({ id, s, userText, history, forceWrap, extWrap, correction });
+  return reply;
+}
+
+// Grade one learner turn against the sentence the previous teacher turn invited.
+// Returns null for the opening turn (nothing was produced yet).
+function gradeProduction({ userText, ladder, rung }) {
+  if (!String(userText || '').trim()) return null;
+  const t = conversationProfile().t;
+  const evaluated = evaluateProduction({
+    text: userText,
+    // What they were invited to say — required for any claim about TONES, since
+    // without a target a different tone is a different word, not an error.
+    expected: ladder?.lastTeacherHanzi || null,
+    t, rung,
+    knownHanzi: new Set(knownHanzi()),
+  });
+  return { ...evaluated, recast: recastLine(evaluated) };
 }
 
 // ── Guided rungs (0/1): frame-built, validated, interlinear, never-strand ────
@@ -291,7 +318,7 @@ export async function conversationTurn({ id, userText = '', history = [], forceW
 const ARC = ['meet', 'identify', 'relate', 'grow', 'use', 'combine', 'win', 'farewell'];
 const HARD_CEILING = 10;                    // absolute backstop, arc normally ends first
 
-function guidedTurn({ id, s, ladder, userText, forceWrap }) {
+function guidedTurn({ id, s, ladder, userText, forceWrap, correction = null }) {
   const knobs = rungKnobs(ladder.rung);
   const { plan } = s;
   let sessionWords = ladder.sessionWords || [];
@@ -403,6 +430,12 @@ function guidedTurn({ id, s, ladder, userText, forceWrap }) {
 
   const lastHanzi = (reply.followFrame?.hanzi) || reply.hanzi;
   const spentFrame = reply.frameId || reply.followFrame?.frameId;
+  // The frames still compute a well-formed answer to their own question; it just stops
+  // being a button. Held back as the on-request model sentence the learner can ask to
+  // see and then has to type themselves.
+  const modelChoice = (reply.followFrame?.choices || reply.choices || [])[0]
+    || (sessionWords[0] ? { hanzi: `这是${sessionWords[0].hanzi}。`, gloss: `This is ${sessionWords[0].gloss || ''}.` } : null);
+  const modelHanzi = modelChoice?.hanzi || '';
   // Advance the arc unless this was a detour we're absorbing (3 detours in a row
   // advances anyway — never stuck on one beat).
   const advance = !detour || stuck >= 3;
@@ -432,7 +465,22 @@ function guidedTurn({ id, s, ladder, userText, forceWrap }) {
     used, stage: 'guided', shouldWrap: !!wrap, wrapReason: wrap ? 'arc-complete' : null,
     closing: !wrap && beat === 'win',
     beat,
-    guided: true, choices: knobs.choices ? (reply.choices || []) : [],
+    guided: true, choices: [],
+    // What they said, and the version of it that is right — rendered under their own
+    // bubble, not as a verdict on the turn.
+    correction: correction?.recast || null,
+    // The sentence this turn invites, kept back until the learner asks for it. It is
+    // the never-strand guarantee without being a button that answers for them.
+    modelAnswer: knobs.modelAnswer === 'on-request' && !wrap && modelHanzi
+      ? { hanzi: modelHanzi,
+          // Never show the model sentence without a reading — a sentence a beginner
+          // cannot pronounce is not a model of anything. groundTokens carries the
+          // CORE_PINYIN floor, so it produces one where the dictionary alone may not.
+          pinyin: modelChoice?.pinyin || pinyinForHanzi(modelHanzi)
+            || groundTokens(modelHanzi, {}).map(t => t.pinyin).filter(Boolean).join(' '),
+          english: modelChoice?.gloss || reply.followFrame?.english || reply.english || '',
+          tokens: groundTokens(modelHanzi, {}) }
+      : null,
   };
 }
 
@@ -513,7 +561,7 @@ function contentWords(hanzi) {
 }
 
 // ── Free rung (2): the existing Director-driven executor conversation ────────
-async function freeTurn({ id, s, userText, history, forceWrap, extWrap }) {
+async function freeTurn({ id, s, userText, history, forceWrap, extWrap, correction = null }) {
   const { plan, blueprint } = s;
   const prevStage = s.stage;
   const exchanges = s.exchanges + (userText ? 1 : 0);
@@ -579,6 +627,9 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap }) {
     profile: prof,
     extraDirective: [antiRepeat,
       freshIdea ? `A natural next thing to bring up (only if it fits): ${freshIdea.hanzi} (${freshIdea.gloss || ''}).` : '',
+      // Naming the exact error beats asking the model to "correct naturally" — told
+      // only the latter, it invents a different mistake to fix, or fixes nothing.
+      recastDirective(correction),
     ].filter(Boolean).join('\n'),
   };
   let reply = await laoshiConverse(converseArgs);
@@ -650,6 +701,9 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap }) {
 
   return { ...reply, tokens, rung: 2, knobs: rungKnobs(2), used, stage, shouldWrap,
     closing: !shouldWrap && wantsWrap,
+    // The model recasts inside its own line; this is the explicit before/after the
+    // learner can look at afterwards. Both, because the recast alone is easy to miss.
+    correction: correction?.recast || null,
     wrapReason: shouldWrap ? completion.reason : null, inlineRep, excursion, audioFirst, newWords };
 }
 

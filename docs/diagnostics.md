@@ -35,6 +35,12 @@ Each level replies from its own script — deliberately imperfect, mixing langua
 stalling — and a confusion turn (`I don't understand`) is injected on turn 3 so the
 never-strand path is always exercised.
 
+Script lines are **tagged**, so the correction probes know what they are looking at:
+`error:<kind>` is a planted mistake that must come back corrected (`我是好`,
+`我有一个猫`, `二个人`), `toneless` is pinyin without tone marks, and `good` is
+unambiguously correct and must never be "corrected". Testing only that errors get
+caught is half a test — the other half is that nothing right gets touched.
+
 **Isolation:** one scratch copy of `app.db` plus a scratch users dir; each level is a
 secondary user with its own state DB. `data/app.db` is never written to.
 
@@ -53,6 +59,10 @@ construction. So:
 
 | probe | severity | what it protects |
 | --- | --- | --- |
+| no-choices | fail | no turn answers for the learner |
+| model-answer | fail | a readable model sentence is always askable at guided rungs |
+| correction | fail | planted errors are corrected AND correct sentences are not |
+| strictness | fail | toneless pinyin is fine early and corrected late |
 | blank-turns | fail | the worst failure mode: an empty teacher bubble |
 | grounding | fail | every reply carries pinyin AND English |
 | decodability | fail | nothing opaque on screen at a guided rung |
@@ -98,7 +108,7 @@ which is the entire argument for sweeping instead of testing one fixture.
    `qwen3-235b-a22b-2507` (4–6× faster, ~5× cheaper, and the only candidate that got 一
    tone sandhi right). See [openrouter.md](./openrouter.md).
 
-After the fixes, all 16 probes are green across all five levels. One warning remains
+After the fixes, all probes are green across all five levels. One warning remains
 and is real:
 
 **Free-rung latency.** p50 6–11s per turn, worst case 30–50s (the first turn of a
@@ -119,3 +129,19 @@ Recorded, not bugs:
   the ordinary word). Both pass the picturable/namable filters but neither is what a
   human would teach in week one. Not fixed here — it is a `beginnerNewWords` ranking
   question, not a bug.
+
+## Sweep 2 (2026-08-13) — after choices were removed
+
+Four probes were added with the switch from selection to production (`no-choices`,
+`model-answer`, `correction`, `strictness`), and one more bug surfaced immediately:
+
+5. **Pinyin was classified as a stall.** (L0, L1.) `classifyIntent` treated any short
+   latin string with no Chinese as a shrug, so a beginner typing `mao` — a correct
+   answer, and the only input they have without an IME — was re-grounded ("let's slow
+   down") and the arc did not advance. Invisible while chips existed, because nobody
+   typed. `convertPinyin` now distinguishes `mao` from `ok`.
+
+All 20 probes green across all five levels. The corrections read the way they should:
+`二个人在这儿` → `两个朋友在这儿…`, `我有一个书` → `你有一本书啊，真好！`, toneless
+`wo xihuan kan shu` echoed back as `我喜欢看书` — recast inside the conversation, no
+grading, no rule named.

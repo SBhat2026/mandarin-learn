@@ -221,6 +221,19 @@ runs the same probes across all of them — decodability, semantic sanity, arc
 completion, never-strand, reading coverage. Non-zero exit on any failure, so it works
 as a pre-deploy gate. See [docs/diagnostics.md](docs/diagnostics.md).
 
+### The learner produces; Laoshi corrects
+
+There are no tap-to-answer choices. Picking `这是猫` from three glossed chips is
+recognition wearing production's clothes — a learner could finish a whole session
+without composing a sentence. Instead they type or speak (pinyin, characters, or the
+pinyin IME), a model sentence is available only on request, and every turn is graded by
+`server/correction.js`: tones, script, measure words, `是`+adjective, `二` vs `两`.
+
+Strictness rises with level — that is the point. A beginner typing `mao` has done
+something real and is left alone; at the top band the same answer is corrected to 猫,
+because letting it pass is how someone ends up fluent in pinyin and illiterate in
+Chinese. See the strictness table in [docs/ladder.md](docs/ladder.md).
+
 ### Tuning how Laoshi teaches Mandarin
 
 `server/mandarin.md` is the editable half of Laoshi's prompt: tones, measure words,

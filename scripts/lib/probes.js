@@ -324,7 +324,77 @@ export function selfTeachHonesty({ reading }) {
   };
 }
 
+// No turn may offer a tap-to-answer chip. The whole point of removing them is that a
+// learner could otherwise finish a session by recognition alone, so this is checked
+// at every level rather than trusted to the knobs.
+export function noChoices({ turns }) {
+  const offending = turns.filter(t => (t.reply?.choices || []).length > 0);
+  return {
+    ok: offending.length === 0, severity: 'fail',
+    detail: offending.length ? `${offending.length} turns offered tap-to-answer choices`
+      : 'no turn answered for the learner',
+    evidence: offending.slice(0, 3).map(t => `turn ${t.i}: ${(t.reply.choices || []).map(c => c.hanzi).join(' / ')}`),
+  };
+}
+
+// Removing the chips is only safe if the learner is never stuck: at the guided rungs
+// a model sentence must be available to ask for, and it must be readable.
+export function modelAnswerAvailable({ turns, rung }) {
+  if (rung >= 2) return { ok: true, severity: 'warn', detail: 'free rung — no model sentence by design', evidence: [], skipped: true };
+  const asking = turns.filter(t => !t.reply?.shouldWrap);
+  const missing = asking.filter(t => !t.reply?.modelAnswer?.hanzi);
+  const unreadable = asking.filter(t => t.reply?.modelAnswer?.hanzi && !t.reply.modelAnswer.pinyin);
+  return {
+    ok: missing.length === 0 && unreadable.length === 0, severity: 'fail',
+    detail: missing.length ? `${missing.length}/${asking.length} turns left no way to see one right answer`
+      : unreadable.length ? `${unreadable.length} model sentences had no pinyin`
+      : `every turn offered a readable model sentence on request`,
+    evidence: [...missing, ...unreadable].slice(0, 3).map(t => `turn ${t.i}`),
+  };
+}
+
+// The deliberate errors the scripted learner makes MUST come back corrected — and
+// nothing correct may be "corrected". Both halves matter equally.
+export function correction({ turns }) {
+  const planted = turns.filter(t => t.plantedError);
+  const missed = planted.filter(t => !t.reply?.correction);
+  const spurious = turns.filter(t => t.knownGood && t.reply?.correction);
+  const ok = missed.length === 0 && spurious.length === 0;
+  return {
+    ok, severity: 'fail',
+    detail: !planted.length ? 'no errors were planted at this level'
+      : missed.length ? `${missed.length}/${planted.length} planted errors went uncorrected`
+      : spurious.length ? `${spurious.length} correct sentences were "corrected"`
+      : `all ${planted.length} planted errors corrected, no false positives`,
+    evidence: [
+      ...missed.map(t => `turn ${t.i}: "${t.userText}" not corrected`),
+      ...spurious.map(t => `turn ${t.i}: "${t.userText}" wrongly corrected to ${t.reply.correction.contrast?.to}`),
+    ].slice(0, 4),
+    skipped: !planted.length,
+  };
+}
+
+// Strictness must actually RISE. Toneless pinyin is a fine beginner answer and an
+// advanced learner avoiding the work; if both are treated the same, the ladder is
+// decorative.
+export function strictnessRises({ turns, level }) {
+  const toneless = turns.filter(t => t.tonelessProbe);
+  if (!toneless.length) return { ok: true, severity: 'warn', detail: 'no toneless probe at this level', evidence: [], skipped: true };
+  const corrected = toneless.filter(t => t.reply?.correction);
+  const shouldCorrect = level.id >= 2;                 // firm/exacting bands
+  const ok = shouldCorrect ? corrected.length > 0 : corrected.length === 0;
+  return {
+    ok, severity: 'fail',
+    detail: shouldCorrect
+      ? (ok ? 'toneless pinyin is corrected at this level' : 'toneless pinyin passed unchallenged at an advanced level')
+      : (ok ? 'toneless pinyin accepted, as it should be for a beginner' : 'a beginner was corrected for typing without tones'),
+    evidence: toneless.slice(0, 2).map(t => `turn ${t.i}: "${t.userText}" → ${t.reply?.correction ? 'corrected' : 'accepted'}`),
+  };
+}
+
 export const CONVERSATION_PROBES = [
+  ['no-choices', noChoices], ['model-answer', modelAnswerAvailable],
+  ['correction', correction], ['strictness', strictnessRises],
   ['blank-turns', blankTurns], ['grounding', grounding], ['decodability', decodability],
   ['semantic-sanity', semanticSanity], ['arc-completion', arcCompletion],
   ['mid-session-growth', midSessionGrowth], ['fixation', fixation], ['repetition', repetition],

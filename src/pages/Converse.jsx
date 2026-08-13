@@ -84,13 +84,22 @@ export default function Converse({ onFallback }) {
       const reply = await api.conversationTurn({ sessionId: sid, history, userText: (opening || forceWrap) ? '' : text, forceWrap });
       if (!reply.hanzi && reply.english?.includes('backend')) { onFallback?.(); return; }
       setItems(prev => {
-        const next = [...prev, {
+        // The correction belongs to the sentence the LEARNER wrote, so it hangs off
+        // their own bubble rather than arriving as a verdict in the teacher's reply.
+        const next = [...prev];
+        if (reply.correction) {
+          for (let i = next.length - 1; i >= 0; i--) {
+            if (next[i].role === 'user') { next[i] = { ...next[i], correction: reply.correction }; break; }
+          }
+        }
+        next.push({
           role: 'assistant',
           hanzi: reply.hanzi, pinyin: reply.pinyin, english: reply.english, note: reply.note,
-          tokens: reply.tokens, newWords: reply.newWords, choices: reply.choices,
+          tokens: reply.tokens, newWords: reply.newWords,
           intro: reply.intro, outro: reply.outro, reground: reply.reground, followFrame: reply.followFrame,
           invite: reply.invite, rung: reply.rung, knobs: reply.knobs, audioFirst: reply.audioFirst,
-        }];
+          modelAnswer: reply.modelAnswer,
+        });
         if (reply.inlineRep) next.push({ type: 'rep', rep: reply.inlineRep });
         return next;
       });
@@ -106,12 +115,14 @@ export default function Converse({ onFallback }) {
 
   // Tap a scaffolded choice → send it as the learner's turn. A confident pick is a
   // hidden comprehension signal that helps the ladder decide when to fade scaffolding.
-  function chooseChip(choice) {
-    if (busy || done) return;
-    api.signalChoice(true).catch(() => {});
-    // tapped=true: assisted production earns recognition-level credit post-hoc,
-    // never full 'spoken' credit (conversation.js heuristicSignals).
-    turn(choice.hanzi, false, null, sessionId, true);
+  // Asking to see the sentence does NOT answer for the learner: it drops the model
+  // sentence into the input box, where they still have to read it and send it. The
+  // tap-to-answer chips this replaced let a whole session be finished by recognition
+  // alone, which is the one thing a speaking app must not allow.
+  function showModel(model) {
+    if (busy || done || !model?.hanzi) return;
+    setInput(model.hanzi);
+    inputRef.current?.focus();
   }
 
   function returnFromExcursion(ex) {
@@ -193,8 +204,9 @@ export default function Converse({ onFallback }) {
         {items.map((it, i) => {
           if (it.type === 'rep') return <InlineRep key={i} rep={it.rep} />;
           if (it.role === 'user') return (
-            <div key={i} className="flex justify-end">
+            <div key={i} className="flex flex-col items-end gap-1">
               <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-md bg-ink text-white"><span className="hanzi text-lg">{it.hanzi}</span></div>
+              {it.correction && <Correction c={it.correction} />}
             </div>
           );
           return (
@@ -202,7 +214,7 @@ export default function Converse({ onFallback }) {
               hiddenAudio={it.audioFirst && !revealed[i]}
               onReveal={() => reveal(i)} onChar={lookupChar}
               isLast={i === lastAssistantIdx && !done}
-              onChoose={chooseChip} />
+              onShowModel={showModel} />
           );
         })}
         {busy && <div className="text-ink-faint text-sm px-2">老师…</div>}
@@ -259,7 +271,7 @@ export default function Converse({ onFallback }) {
 // One teacher bubble. Assembles, in order: an intro lead-in, the meet-the-words strip,
 // the (re-grounded) interlinear sentence, and tap-to-say choices. Falls back to the
 // plain reveal view at the free rung.
-function TeacherBubble({ it, idx, scriptMode, hiddenAudio, onReveal, onChar, isLast, onChoose }) {
+function TeacherBubble({ it, idx, scriptMode, hiddenAudio, onReveal, onChar, isLast, onShowModel }) {
   const interlinear = it.knobs?.interlinear && it.knobs.interlinear !== 'reveal';
   return (
     <div className="flex justify-start">
@@ -284,7 +296,7 @@ function TeacherBubble({ it, idx, scriptMode, hiddenAudio, onReveal, onChar, isL
               : <TeacherText hanzi={it.hanzi} pinyin={it.pinyin} english={it.english} mode={scriptMode} onChar={onChar} onSpeak={() => speak(it.hanzi)} />}
             {it.outro?.hanzi && <IntroLine line={it.outro} muted interlinear={interlinear} />}
             {it.note && <div className="text-[12px] text-jade-600 border-t border-line pt-2">💡 {it.note}</div>}
-            {isLast && it.choices?.length > 0 && <Choices choices={it.choices} invite={it.invite} onChoose={onChoose} />}
+            {isLast && it.modelAnswer?.hanzi && <ModelAnswer model={it.modelAnswer} invite={it.invite} onShow={onShowModel} />}
           </>
         )}
       </div>
@@ -358,21 +370,47 @@ function Interlinear({ tokens = [], english }) {
   );
 }
 
-// Scaffolded responses: glossed tap-to-say chips. Tapping sends it as the learner's
-// turn. No scoring, no "correct/wrong" — just ready ways to reply so they're never stuck.
-function Choices({ choices, invite, onChoose }) {
+// This replaced tap-to-say choice chips. Those chips were recognition dressed as
+// production: picking 这是猫 from three options exercises none of the retrieval that
+// composing 这是猫 does, and a learner could finish an entire session without ever
+// building a sentence. Now the model sentence is hidden until asked for, and asking
+// only puts it in the input box — the learner still types and sends it themselves.
+function ModelAnswer({ model, invite, onShow }) {
+  const [shown, setShown] = useState(false);
   return (
     <div className="pt-1.5 border-t border-line/70">
-      {invite && <div className="text-[11px] text-jade-700 mb-1">你试试看 · your turn — tap to say it</div>}
-      <div className="flex flex-wrap gap-1.5">
-        {choices.map((c, i) => (
-          <button key={i} onClick={() => onChoose(c)}
-            className="px-3 py-1.5 rounded-full text-left border border-line bg-white hover:border-jade-300 hover:bg-jade-50/50 transition">
-            <span className="hanzi text-[15px] text-ink">{c.hanzi}</span>
-            {c.gloss && <span className="text-[11px] text-ink-faint ml-1.5">{c.gloss}</span>}
-          </button>
-        ))}
+      {invite && <div className="text-[11px] text-jade-700 mb-1">你试试看 · your turn — say it yourself</div>}
+      {!shown ? (
+        <button onClick={() => setShown(true)}
+          className="text-[12px] text-ink-faint hover:text-ink border border-line rounded-full px-3 py-1 bg-white/70">
+          不会说？· show me one way
+        </button>
+      ) : (
+        <button onClick={() => onShow(model)}
+          className="text-left px-3 py-1.5 rounded-2xl border border-jade-200 bg-jade-50/60 hover:border-jade-400 transition">
+          <span className="hanzi text-[15px] text-ink">{model.hanzi}</span>
+          <span className="text-[11px] text-jade-700 ml-2"><TonedPinyin pinyin={model.pinyin} /></span>
+          <div className="text-[11px] text-ink-faint mt-0.5">{model.english} · tap to put it in the box, then send it yourself</div>
+        </button>
+      )}
+    </div>
+  );
+}
+
+// What they wrote, and the version of it that is right — under their OWN bubble,
+// because it is about their sentence and not a verdict on the turn. Never "wrong",
+// never a score: the contrast is the whole lesson.
+function Correction({ c }) {
+  return (
+    <div className={`max-w-[80%] px-3 py-2 rounded-2xl border text-right ${
+      c.soft ? 'bg-white/70 border-line' : 'bg-amber-50/70 border-amber-200'}`}>
+      <div className="text-[13px]">
+        <span className="hanzi text-ink-faint line-through decoration-ink-faint/50">{c.contrast.from}</span>
+        <span className="mx-1.5 text-ink-faint">→</span>
+        <span className="hanzi text-ink font-medium">{c.contrast.to}</span>
       </div>
+      {c.pinyin && <div className="text-[11px] text-jade-700 mt-0.5"><TonedPinyin pinyin={c.pinyin} /></div>}
+      <div className="text-[11px] text-ink-faint mt-0.5">{c.english}</div>
     </div>
   );
 }

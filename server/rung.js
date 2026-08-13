@@ -30,6 +30,19 @@ export function recordChoiceOutcome(correct) {
   return o;
 }
 
+// The signal used to come from tapping a scaffolded choice. Those are gone — picking
+// a glossed chip is recognition wearing production's clothes, and it let a learner
+// finish a whole session without composing a sentence. The ladder now reads the same
+// store, filled by what the learner actually PRODUCED: a turn accepted without a hard
+// correction is the evidence that used to come from a correct tap.
+//
+// This is a strictly better signal. It is automatic (every typed turn feeds it, with
+// no UI to click), and it measures composition rather than selection.
+export function recordProductionOutcome({ accepted = false, aside = false } = {}) {
+  if (aside) return null;                 // an English question is not a failed sentence
+  return recordChoiceOutcome(accepted);
+}
+
 export function comprehensionSignal() {
   const ch = getModel('choice_obs', { correct: 0, total: 0 }) || {};
   const chan = getModel('channel_obs', { reveal_text: 0, kept_audio: 0 }) || {};
@@ -88,9 +101,13 @@ export function currentRung({ commit = false } = {}) {
 // they stop leaning on pinyin.
 export function rungKnobs(rung = 0) {
   switch (clamp(rung, 0, 2)) {
-    case 0: return { rung: 0, interlinear: 'full', newPerTurn: 1, generation: 'frame', choices: true, name: 'guided' };
-    case 1: return { rung: 1, interlinear: 'partial', newPerTurn: 2, generation: 'hybrid', choices: true, name: 'semi' };
-    default: return { rung: 2, interlinear: 'reveal', newPerTurn: 99, generation: 'free', choices: false, name: 'free' };
+    // `choices` is false at every rung and stays that way: a tap-to-answer chip lets
+    // the learner offload the retrieval that IS the learning. `modelAnswer` replaces
+    // it — the sentence is available, but only when the learner asks for it, and they
+    // still have to produce it themselves.
+    case 0: return { rung: 0, interlinear: 'full', newPerTurn: 1, generation: 'frame', choices: false, modelAnswer: 'on-request', name: 'guided' };
+    case 1: return { rung: 1, interlinear: 'partial', newPerTurn: 2, generation: 'hybrid', choices: false, modelAnswer: 'on-request', name: 'semi' };
+    default: return { rung: 2, interlinear: 'reveal', newPerTurn: 99, generation: 'free', choices: false, modelAnswer: 'off', name: 'free' };
   }
 }
 

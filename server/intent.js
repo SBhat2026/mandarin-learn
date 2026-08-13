@@ -5,6 +5,7 @@
 // "always find a way forward" rule: a confused or off turn still yields a next move.
 import { pinyinForHanzi } from './pronunciation.js';
 import { groundTokens } from './vocabguard.js';
+import { convertPinyin } from './pinyinime.js';
 
 const CJK = /[一-鿿]/;
 const cjkCount = (s) => (String(s).match(/[一-鿿]/g) || []).length;
@@ -40,7 +41,16 @@ export function classifyIntent(text = '', { prevTeacherHanzi = '' } = {}) {
   // A short lone LATIN reply (e.g. "ok", "idk") with no Chinese reads as a stall; a
   // short CHINESE reply (对 / 好 / 是) is a legitimate answer at the guided rung, so it
   // flows as normal — never re-ground a correct one-word answer.
-  if (zh === 0 && lat && lat <= 3) return { kind: 'stall', text: t };
+  //
+  // PINYIN is the third case, and it is the one that matters now that tap-to-answer
+  // choices are gone: a beginner with no IME types `mao`, which is a real attempt at
+  // 猫, not a shrug. Treating it as a stall re-grounded the learner for answering
+  // correctly and stalled the arc on the exact input the app now asks them for.
+  if (zh === 0 && lat) {
+    const conv = convertPinyin(t);
+    if (conv.ok || conv.isPinyin) return { kind: 'normal', text: t, script: 'pinyin' };
+    if (lat <= 3) return { kind: 'stall', text: t };
+  }
 
   return { kind: 'normal', text: t };
 }
