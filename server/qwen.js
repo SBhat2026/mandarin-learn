@@ -25,7 +25,10 @@ const OLLAMA_MODEL = process.env.QWEN_MODEL || 'qwen3.5:latest';
 // once a learner has any vocabulary, and an overrun prompt gets silently truncated —
 // which showed up as Laoshi returning an EMPTY turn and the UI hanging on "老师…".
 // Ask for a window that actually fits the prompt we send.
-const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX || 8192);
+// The executor prompt grew a lot (persona + blueprint + Mandarin doctrine + talk move
+// + known words + history). At 8192 the local fallback silently truncated it and
+// returned degenerate turns — "是很好", "猫" — after 20-35s of work.
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX || 16384);
 const DASHSCOPE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
 const DASHSCOPE_MODEL = process.env.DASHSCOPE_MODEL || 'qwen-plus';
 
@@ -214,7 +217,11 @@ function calibrationDirective(signal) {
 // owning wording, curiosity, and tone, while the educational objectives stay
 // invisible. Replaces the old raw-vocab conductor prompt.
 function executorSystem({ blueprint, stage = 'explore', knownWords = [], profileDigest = '', scriptDirective = '', graphSteer = '', conversationMemory = '', profile = null, extraDirective = '' }) {
-  const known = knownWords.slice(0, 300).join(' ');
+  // Trimmed from 300. The list is the least valuable text in the prompt per byte —
+  // the model does not honour it precisely anyway, and validateTurn enforces the real
+  // constraint after the fact — while being one of the largest contributors to the
+  // truncation that produced degenerate turns.
+  const known = knownWords.slice(0, 80).join(' ');
   const opps = (blueprint.educationalOpportunities || []).slice(0, 3)
     .map(o => `${o.objective}${o.vocab?.length ? ' [' + o.vocab.join(' ') + ']' : ''}`).join(' · ');
   const conn = (blueprint.personalConnections || []).slice(0, 3).join('; ');

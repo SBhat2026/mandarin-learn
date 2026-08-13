@@ -12,10 +12,11 @@
 // rungs so even free-conversation output is checked before it's rendered. Everything
 // here is invisible; it never announces vocabulary or a lesson.
 import { db } from './db.js';
-import { pinyinForHanzi, glossForHanzi } from './pronunciation.js';
+import { pinyinForHanzi, glossForHanzi, joinSyllables, pinyinForText, applySandhi, contextualReading } from './pronunciation.js';
 import { knownWordIds } from './planner.js';
 import { newCandidates } from './planner.js';
 import { imageFor, picturableHead, EVERYDAY_KEYWORDS } from './images.js';
+import { interestAnchors } from './profile.js';
 
 const CJK = /[一-鿿]/;
 const isCjk = (c) => CJK.test(c);
@@ -80,7 +81,10 @@ const CORE_PINYIN = {
   现在: 'xiànzài', 今天: 'jīntiān', 明天: 'míngtiān', 昨天: 'zuótiān',
   因为: 'yīnwèi', 所以: 'suǒyǐ', 但是: 'dànshì', 觉得: 'juéde', 可以: 'kěyǐ', 真: 'zhēn', 很多: 'hěnduō', 一点: 'yìdiǎn',
 };
-const py = (hanzi) => pinyinForHanzi(hanzi) || CORE_PINYIN[hanzi] || '';
+// RENDER-layer reading: a token is one word, so its syllables run together
+// (gāozhōng, not gāo zhōng). The analysis layer keeps pinyinForHanzi's space-separated
+// form, because tone/syllable comparison needs the syllables apart.
+const py = (hanzi) => joinSyllables(pinyinForHanzi(hanzi) || CORE_PINYIN[hanzi] || '');
 
 export function coreSet(rung = 0) {
   return new Set(rung >= 1 ? CORE_RUNG1 : CORE_RUNG0);
@@ -150,13 +154,30 @@ export function validateTurn(hanzi, allowed) {
 // Turn a Chinese sentence into {hanzi,pinyin,gloss,isNew,audioRef} per word so the UI
 // can render word-by-word. `newSet` marks words introduced this session (highlight).
 export function groundTokens(hanzi, { newSet = new Set() } = {}) {
-  return segment(hanzi).map(seg => ({
+  const tokens = segment(hanzi).map(seg => ({
     hanzi: seg,
     pinyin: py(seg),
     gloss: FUNCTION_GLOSS[seg] || cleanShort(glossForHanzi(seg)),
     isNew: newSet.has(seg),
     audioRef: null,
   }));
+  // 一/不 sandhi crosses token boundaries (一 + 只 → yì zhī), so it has to be applied
+  // to the line rather than per token — otherwise the interlinear shows a reading the
+  // learner would never actually say.
+  return applyTokenSandhi(tokens);
+}
+
+function applyTokenSandhi(tokens) {
+  // Context-dependent readings first — 只 after a numeral is the measure word zhī,
+  // not zhǐ "only" — then sandhi over the corrected stream.
+  const fixed = tokens.map((t, i) => {
+    if ([...t.hanzi].length !== 1) return t;
+    const read = contextualReading([tokens[i - 1]?.hanzi, t.hanzi, tokens[i + 1]?.hanzi], 1, t.pinyin);
+    return read === t.pinyin ? t : { ...t, pinyin: read };
+  });
+  const flat = applySandhi(fixed.map(t => t.pinyin || ''));
+  tokens = fixed;
+  return tokens.map((t, i) => (flat[i] && flat[i] !== t.pinyin ? { ...t, pinyin: flat[i] } : t));
 }
 // One sense, chosen for a LEARNER rather than taken in dictionary order. CEDICT
 // lists archaic senses first often enough that the naive first-sense gloss produced
@@ -477,7 +498,53 @@ function namableGloss(g) {
   return true;
 }
 
+// The words the learner's own vocabulary pulls toward: everything the knowledge graph
+// links to a word they have used unprompted (collocation, topic, sentence
+// co-occurrence, shared character). Character-overlap alone was far too narrow — 猫
+// shares nothing with 车/钱/路, yet "cat" should obviously pull toward other animals
+// and the things you do with them.
+// NOT collocation edges: those are raw co-occurrence, so the "neighbours" of 猫 come
+// back as 有 的 了 是 我 — the commonest particles in the language, which relate every
+// word to every other and steer nothing. TOPIC edges are the ones that carry meaning:
+// 猫 and 狗 both point at `animals`, so a learner who talks about their cat gets
+// taught the rest of that world.
+function affinityIds(anchors) {
+  const ids = new Set();
+  if (!anchors?.engaged?.length) return ids;
+  const idOf = db().prepare('SELECT id FROM words WHERE hanzi=?');
+  const topicsOf = db().prepare(`SELECT dst FROM graph_edges
+    WHERE src_type='word' AND src=? AND rel='topic' AND dst_type='topic'`);
+  const wordsIn = db().prepare(`SELECT src FROM graph_edges
+    WHERE rel='topic' AND dst_type='topic' AND dst=? AND src_type='word' LIMIT 60`);
+  const topics = new Set();
+  for (const a of anchors.engaged) {
+    const row = idOf.get(a);
+    if (!row) continue;
+    for (const t of topicsOf.all(String(row.id))) topics.add(t.dst);
+  }
+  for (const t of topics) {
+    for (const e of wordsIn.all(t)) {
+      const n = Number(e.src);
+      if (Number.isFinite(n)) ids.add(n);
+    }
+  }
+  return ids;
+}
+
+// A stated interest still matters when the graph has nothing — match it against the
+// candidate's gloss.
+function interestMatch(hanzi, anchors) {
+  const gloss = String(glossForHanzi(hanzi) || '').toLowerCase();
+  for (const i of anchors?.interests || []) {
+    const word = String(i).toLowerCase().split(/\s+/)[0];
+    if (word.length >= 3 && gloss.includes(word)) return 0.8;
+  }
+  return 0;
+}
+
 export function beginnerNewWords(n = 3, { introduced } = {}) {
+  const anchors = interestAnchors();
+  const affinity_ids = affinityIds(anchors);
   const cands = newCandidates(240, introduced);
   const core = coreSet(1);                                       // never "meet" a function word
   // Source `concrete` is noisy (many words default high), so PICTURABILITY (the curated
@@ -510,11 +577,15 @@ export function beginnerNewWords(n = 3, { introduced } = {}) {
     const hsk = w.hsk_level ?? null;
     if (hsk != null && hsk > 2) continue;
     const hskBonus = hsk === 1 ? 1.2 : hsk === 2 ? 0.3 : 0;
+    // Pull new vocabulary toward what this learner actually talks about. A word that
+    // shares a character or a topic with something they have used unprompted is worth
+    // more to them than the next entry on a frequency list.
+    const affinity = (affinity_ids.has(c.id) ? 1.2 : 0) + interestMatch(w.hanzi, anchors);
     // The emoji must depict the word itself, not a modifier in its gloss.
     if (picturableHead(cleanShort(w.gloss || w.english || '')) || imageFor(w.hanzi).kind === 'url') {
-      picturableTier.push({ id: c.id, hanzi: w.hanzi, score: c.score + hskBonus + (charLen === 1 ? 0.6 : 0), picturable: true });
+      picturableTier.push({ id: c.id, hanzi: w.hanzi, score: c.score + hskBonus + affinity + (charLen === 1 ? 0.6 : 0), picturable: true });
     } else if ((w.concrete ?? 0) >= 2) {
-      nounTier.push({ id: c.id, hanzi: w.hanzi, score: c.score + hskBonus, picturable: false });
+      nounTier.push({ id: c.id, hanzi: w.hanzi, score: c.score + hskBonus + affinity, picturable: false });
     }
   }
   picturableTier.sort((a, b) => b.score - a.score);
@@ -548,7 +619,7 @@ export function vocabToken(wordId) {
 // against the allowed set, gets exactly ONE repair pass naming what leaked, and falls
 // back to the template if it still drifts or if no backend is reachable. The offline
 // guarantee is unchanged — a turn always exists.
-export function beginnerPrompt({ goal, allowed, sessionWords, userText, history = [], push = 'gentle' }) {
+export function beginnerPrompt({ goal, allowed, sessionWords, userText, history = [], push = 'gentle', move = '' }) {
   const vocab = [...allowed].join(' ');
   const focus = sessionWords.map(w => `${w.hanzi} (${w.gloss || ''})`).join(', ');
   const recent = history.slice(-4).map(m => `${m.role === 'user' ? 'learner' : '老师'}: ${m.content}`).join('\n');
@@ -573,6 +644,7 @@ Write ONE short turn (1–2 sentences, under 16 characters) that:
 - ENDS BY ASKING THEM SOMETHING, so they have a reason to reply
 - trades information: tell them something small about you, or ask about them
 - ${PUSH[push] || PUSH.gentle}
+${move ? `\n${move}\n` : ''}
 
 NEVER just state a fact about an object. "这是书。" is what we are replacing — it
 tells them nothing and invites nothing.

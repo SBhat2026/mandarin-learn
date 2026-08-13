@@ -283,3 +283,69 @@ time; sometimes just react". Taken literally the model reacted and CLOSED nearly
 turn ("你很好，别担心。"), measured at 2/13 turns inviting a reply. Replaced with an
 explicit ball-in-their-court rule plus "trade information". **Still the weakest point
 at ~38-50%** — see diagnostics.md.
+
+---
+
+## 2026-08-13 (evening) — talk moves, pinyin orthography, personalisation
+
+### The free rung, fixed properly (`server/talkmoves.js`)
+
+"Ask a question more often" got it from 15% to ~40% and stalled. The dialogic-tutoring
+literature names the actual failure modes, and they describe our transcripts exactly:
+**monologic delivery** (a complete turn that bypasses the learner's thinking),
+**asymmetrical dialogue** (the tutor drives instead of responding), and
+**insufficient responsiveness** (nothing accumulates across turns).
+
+The remedy there is not more questions but a small set of named **talk moves**
+(Accountable Talk / TalkMoves: revoicing, press-for-reasoning, probing, adding-on,
+eliciting). We pick ONE in code per turn and hand the model a single instruction,
+because a model told to "vary your turns" does not — it settles into whichever move is
+cheapest, which for a warm persona is the closed compliment that ends the conversation.
+
+`pickMove()` also applies **contingency**: a learner who produced one or two characters
+gets `elicit`, not `press for reasoning`, because a move has to fit what they can
+currently do or it becomes an obstacle. Moves don't repeat within three turns.
+
+Result: **15% → 69% of turns invite a reply, and 83% now reuse something the learner
+said** (revoicing is doing the work). Guided rungs 71–86%.
+
+Two things this surfaced that were NOT pedagogy:
+
+- The prompt had grown to ~8–10K chars (persona + blueprint + Mandarin doctrine + talk
+  move + 300 known words + history). The local fallback truncated it and returned
+  degenerate turns — `是很好`, `猫` — after 20–35 seconds. `OLLAMA_NUM_CTX` 8192 →
+  16384, and the known-word list 300 → 80 (the least valuable text per byte, since
+  `validateTurn` enforces the real constraint afterwards anyway).
+- A degenerate reply (under 4 characters) is now rejected and regenerated.
+
+### Pinyin orthography (`server/pronunciation.js`)
+
+Pinyin is written by WORD, not by syllable (GB/T 16159). **8668 of 8736 two-character
+words in our data store their reading space-separated**, so the learner was reading
+syllable soup — and the app's own doctrine ("wǒmen, not wǒ men") contradicted its
+output. Fixed at the render layer rather than by migrating the dictionaries:
+
+- `joinSyllables()` — 高中 `gāo zhōng` → `gāozhōng`, with an apostrophe where the join
+  would be ambiguous (西安 → `Xī'ān`).
+- `applySandhi()` — 一 and 不 sandhi **is** written in teaching materials because it is
+  lexicalised: 一只猫 `yì zhī māo`, 不是 `bú shì`, 一个人 `yí ge rén` (个 is neutral on
+  the surface but underlyingly 4th tone, which still conditions 一). Third-tone sandhi
+  stays unwritten, per the standard.
+- `contextualReading()` — 只 after a numeral is the measure word `zhī`, not `zhǐ`
+  "only". The dictionary's first reading gave `yī zhǐ māo`, a different word.
+- Measure words bind LEFT to their number, so greedy segmentation stops swallowing
+  them: 一个人 is 一 + 个 + 人, not 一 + 个人 (`yí gèrén`).
+
+The ANALYSIS layer keeps the space-separated form — tone comparison needs syllables
+apart — so only rendering changed.
+
+### Personalisation (`server/profile.js`)
+
+The profile harvested facts and nothing used them to choose **what to teach**, which is
+the personalisation that matters most here. `recordEngagement()` now records the
+content words the learner produces unprompted — the truest statement of what they care
+about — and `beginnerNewWords` biases toward the same **topic**.
+
+Not collocation edges: those are raw co-occurrence, so the "neighbours" of 猫 come back
+as 有 的 了 是 我, which relate every word to every other and steer nothing. Topic edges
+carry the meaning. A learner who talks about their cat and dog now gets 鱼 offered next.

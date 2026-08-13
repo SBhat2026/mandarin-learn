@@ -8,7 +8,7 @@
 import { db, getModel, setModel, getSetting } from './db.js';
 import { buildLessonPlan } from './neighborhood.js';
 import { buildBlueprint, buildBlueprintLocal } from './director.js';
-import { profileForPrompt } from './profile.js';
+import { profileForPrompt, recordEngagement, interestAnchors } from './profile.js';
 import { laoshiConverse, conversationStage, chat, available as qwenAvailable } from './qwen.js';
 import { knownWordIds, introducedWordIds } from './planner.js';
 import { createCardsForWord } from './cards.js';
@@ -24,6 +24,7 @@ import { allowedSet, buildFrameTurn, groundTokens, beginnerNewWords, vocabToken,
 import { classifyIntent, regroundReply, expressionGapReply } from './intent.js';
 import { graphNeighbors, graphSteer, nextConcepts } from './graphwalk.js';
 import { conversationProfile } from './level.js';
+import { pickMove, talkMoveDirective, performsMove } from './talkmoves.js';
 import { pinyinForHanzi, glossForHanzi } from './pronunciation.js';
 
 function genId() {
@@ -73,6 +74,8 @@ const getLadder = (id) => getModel(ladderKey(id), null);
 const setLadder = (id, s) => setModel(ladderKey(id), s);
 // What the free-rung teacher has already been ON about, per conversation.
 const topicsKey = (id) => `topics:${id}`;
+// Which talk moves this conversation has already used, so they rotate.
+const movesKey = (id) => `moves:${id}`;
 
 // Absolute exchange ceiling for a free conversation, whatever the blueprint budget
 // says. Past this it is no longer a conversation, it is a treadmill.
@@ -326,6 +329,11 @@ export async function conversationTurn({ id, userText = '', history = [], forceW
   // is what feeds the ladder, replacing the tap-accuracy signal that choices gave.
   const correction = gradeProduction({ userText, ladder, rung });
   if (correction) recordProductionOutcome({ accepted: correction.accepted, aside: correction.aside });
+  // What they reached for unprompted is the truest statement of what they care about,
+  // and it is what steers which words they meet next.
+  if (correction?.produced) {
+    recordEngagement(segment(correction.produced).filter(w => !coreSet(2).has(w)));
+  }
 
   const reply = (rung < 2 && ladder && ladder.sessionWords?.length)
     ? await guidedTurn({ id, s, ladder, userText, forceWrap, correction })
@@ -350,10 +358,10 @@ const COMPOSED_BEATS = new Set(['identify', 'relate', 'use']);
 // What "invites a reply" means, in code — the same test the diagnostics probe uses.
 const ASKS = /[？?]|吗|呢|什么|几|谁|哪|怎么样|为什么/;
 
-async function composeGuidedTurn({ goal, sessionWords, userText, rung, history, push }) {
+async function composeGuidedTurn({ goal, sessionWords, userText, rung, history, push, move }) {
   if (!(await qwenAvailable())) return null;
   const allowed = allowedSet({ rung, sessionWords });
-  const base = beginnerPrompt({ goal, allowed, sessionWords, userText, history, push });
+  const base = beginnerPrompt({ goal, allowed, sessionWords, userText, history, push, move: talkMoveDirective(move) });
   let leaks = '';
   for (let attempt = 0; attempt < 2; attempt++) {
     let reply;
@@ -365,7 +373,7 @@ async function composeGuidedTurn({ goal, sessionWords, userText, rung, history, 
     // A turn that asks nothing is the exact failure we replaced templates to escape,
     // so it is not worth keeping merely because a model wrote it. The frames always
     // ask; rejecting here means the fallback is strictly better than what we discard.
-    if (!ASKS.test(reply.hanzi)) {
+    if (!performsMove(reply.hanzi).ok) {
       if (attempt === 1) return null;
       leaks = '(that stated a fact and asked nothing — it MUST end by asking them something)';
       console.log('[guided] composed turn asked nothing — repairing');
@@ -588,7 +596,8 @@ async function guidedTurn({ id, s, ladder, userText, forceWrap, correction = nul
     let frame = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1, focusHanzi: focus?.hanzi });
     const composed = COMPOSED_BEATS.has(beat)
       ? await composeGuidedTurn({ goal: goal.en, sessionWords, userText, rung: ladder.rung,
-          history: ladder.history || [], push: strictness(prof.t, ladder.rung).band })
+          history: ladder.history || [], push: strictness(prof.t, ladder.rung).band,
+          move: pickMove({ history: ladder.history || [], userText, usedMoves: ladder.usedMoves || [], turnIndex: beatIdx }) })
       : null;
     // The fallback has to clear the same bar as the thing it replaces. Half the frames
     // are statements ("我有钱。"), and falling back to one turned a conversational beat
@@ -839,6 +848,10 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap, correcti
     : '';
 
   const prof = conversationProfile();
+  // One named talk move per turn, rotated in code and never repeating within three
+  // turns, so the conversation cannot settle into a single shape.
+  const usedMoves = getModel(movesKey(id), []) || [];
+  const move = pickMove({ history: soFar, userText, usedMoves, turnIndex: exchanges });
   const converseArgs = {
     blueprint, stage, history, userText, graphSteer: steer, conversationMemory: memory,
     knownWords: knownStrings(), profileDigest: profileForPrompt(), scriptDirective: plan.scriptDirective,
@@ -852,6 +865,10 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap, correcti
       // executor keeps serving the plan's topic at someone who just said they want
       // a different one.
       steerDirective(userText),
+      // ONE named Accountable-Talk move per turn, chosen in code. Asking the model to
+      // "vary its turns" does not work — it settles on the easiest move, which for a
+      // warm persona is the closed compliment that ends the conversation.
+      talkMoveDirective(move),
     ].filter(Boolean).join('\n'),
   };
   let reply = await laoshiConverse(converseArgs);
@@ -872,8 +889,20 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap, correcti
   const said = contentWords(reply.hanzi);
   const recycled = said.length > 0 && said.every(w => spent.includes(w));
   const tooDense = unknown.length > UNKNOWN_TOLERANCE;
-  if (!wantsWrap && (recycled || tooDense)) {
+  // A turn that hands nothing back is a dead end, however warm it sounds. This is
+  // the measured failure: "你有一只可爱的猫，真好。" — reacts, closes, and the learner
+  // has nothing to answer.
+  const perf = performsMove(reply.hanzi);
+  // A two-character non-answer ("猫", "是很好") is a degenerate generation, not a
+  // laconic turn — it appeared only when the prompt overran the local model's context.
+  const degenerate = [...String(reply.hanzi || '')].filter(c => /[一-鿿]/.test(c)).length < 4;
+  const deadEnd = !wantsWrap && (!perf.ok || degenerate);
+  if (!wantsWrap && (recycled || tooDense || deadEnd)) {
     const why = [
+      degenerate ? 'Your draft was too short to be a turn. Write a complete 1-2 sentence reply that reacts to what they said and asks them something.' : '',
+      deadEnd && !degenerate ? (perf.closedCompliment
+        ? 'Your draft ended on a closed compliment, which stops the conversation dead. Rewrite so it hands the turn back — perform the move you were given.'
+        : 'Your draft gave them nothing to reply to. Rewrite so it ends by asking them something about what THEY said.') : '',
       tooDense ? `Your draft leaned on too many words this learner has not met (${unknown.join(' ')}). Say the same thing more simply — keep at most one or two of them.` : '',
       recycled ? `Your draft was about ${said.join(' ')} again — the same subject as your last turns. Change what you are talking about: react to what they just said and go somewhere new${freshIdea ? ` (e.g. ${freshIdea.hanzi})` : ''}.` : '',
     ].filter(Boolean).join(' ');
@@ -921,7 +950,8 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap, correcti
 
   if (reply.hanzi) setModel(topicsKey(id), [...spent, ...contentWords(reply.hanzi)].slice(-16));
 
-  return { ...reply, tokens, rung: 2, knobs: rungKnobs(2), used, stage, shouldWrap,
+  setModel(movesKey(id), [...usedMoves, move.name].slice(-8));
+  return { ...reply, tokens, rung: 2, knobs: rungKnobs(2), used, stage, shouldWrap, move: move.name,
     closing: !shouldWrap && wantsWrap,
     // The model recasts inside its own line; this is the explicit before/after the
     // learner can look at afterwards. Both, because the recast alone is easy to miss.

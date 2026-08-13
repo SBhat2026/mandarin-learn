@@ -219,3 +219,114 @@ export function persistPronunciation({ wordId = null, source = 'exercise', analy
     analysis.fluency, analysis.hesitation, analysis.confidence, analysis.accuracy,
   );
 }
+
+// ── Pinyin orthography ──────────────────────────────────────────────────────
+// Pinyin is written by WORD, not by syllable (GB/T 16159): 高中 is `gāozhōng`, not
+// `gāo zhōng`. Our imported data disagrees — 8668 of 8736 two-character words store
+// their reading space-separated — so the learner was reading syllable soup, and the
+// app's own teaching doctrine ("wǒmen, not wǒ men") contradicted its output.
+// Normalising at render time rather than migrating the data keeps the source
+// dictionaries untouched and fixes every call site at once.
+const TONE_TO_PLAIN = { ā: 'a', á: 'a', ǎ: 'a', à: 'a', ē: 'e', é: 'e', ě: 'e', è: 'e',
+  ī: 'i', í: 'i', ǐ: 'i', ì: 'i', ō: 'o', ó: 'o', ǒ: 'o', ò: 'o',
+  ū: 'u', ú: 'u', ǔ: 'u', ù: 'u', ǖ: 'ü', ǘ: 'ü', ǚ: 'ü', ǜ: 'ü' };
+
+export function toneNumber(syllable = '') {
+  const s = String(syllable).toLowerCase();
+  for (const ch of s) {
+    const t = '01234'.indexOf('x') , m = { 1: 'āēīōū ǖ', 2: 'áéíóú ǘ', 3: 'ǎěǐǒǔ ǚ', 4: 'àèìòù ǜ' };
+    for (const [n, set] of Object.entries(m)) if (set.includes(ch)) return Number(n);
+  }
+  return 0;
+}
+
+// One word's syllables run together. Apostrophe where the join would be ambiguous —
+// 西安 is `Xī'ān`, not `Xīan`.
+export function joinSyllables(pinyin = '') {
+  const syls = String(pinyin).trim().split(/\s+/).filter(Boolean);
+  if (syls.length <= 1) return String(pinyin).trim();
+  let out = syls[0];
+  for (const s of syls.slice(1)) {
+    const firstPlain = TONE_TO_PLAIN[s[0]] || s[0];
+    out += /[aoe]/.test(firstPlain) ? `'${s}` : s;
+  }
+  return out;
+}
+
+// 一 and 不 sandhi IS written in teaching materials, because it is lexicalised and
+// the learner has to say it that way. Third-tone sandhi (3-3 → 2-3) is NOT written —
+// that one stays a pronunciation fact, per the standard and per our own doctrine.
+export function applySandhi(syllables = []) {
+  const out = [...syllables];
+  for (let i = 0; i < out.length - 1; i++) {
+    const cur = out[i], next = out[i + 1];
+    const bare = String(cur).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    // Some syllables are neutral on the surface but carry an underlying tone that
+    // still triggers sandhi — 个 is toneless in speech yet 一个 is `yí ge`, because
+    // 个 is underlyingly 4th. Without this the commonest phrase in the language
+    // rendered as "yī ge".
+    const nextBare = String(next).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    const nt = toneNumber(next) || UNDERLYING_TONE[nextBare] || 0;
+    if (bare === 'yi') out[i] = nt === 4 ? 'yí' : (nt >= 1 && nt <= 3 ? 'yì' : cur);
+    else if (bare === 'bu') out[i] = nt === 4 ? 'bú' : cur;
+  }
+  return out;
+}
+
+// Readings that depend on the word around them. 只 is `zhī` as a measure word and
+// `zhǐ` as "only" — the dictionary's first reading gave "yī zhǐ māo" for 一只猫,
+// which is a different word and the wrong sound.
+// Neutral-tone syllables whose underlying tone still conditions 一/不 sandhi.
+const UNDERLYING_TONE = { ge: 4, xie: 1, zi: 3, men: 2, le: 4, de: 4 };
+
+const MEASURE = new Set(['个', '只', '本', '条', '杯', '件', '张', '把', '支', '辆', '匹', '位', '些', '点']);
+const NUMERAL = /^[一二两三四五六七八九十几这那每半]$/;
+
+const CONTEXT_READING = [
+  { char: '只', when: (prev) => /^[一二两三四五六七八九十几这那每]$/.test(prev || ''), read: 'zhī' },
+  { char: '长', when: (prev, next) => next === '大', read: 'zhǎng' },
+  { char: '行', when: (prev) => /^[银不]$/.test(prev || ''), read: 'háng' },
+  { char: '觉', when: (prev) => prev === '睡', read: 'jiào' },
+  { char: '乐', when: (prev) => /^[音]$/.test(prev || ''), read: 'yuè' },
+];
+export function contextualReading(chars, i, fallback) {
+  for (const r of CONTEXT_READING) {
+    if (chars[i] === r.char && r.when(chars[i - 1], chars[i + 1])) return r.read;
+  }
+  return fallback;
+}
+
+// The reading of a whole sentence, written properly: segmented into words, each word
+// run together, words separated by spaces, sandhi applied across the whole line.
+export function pinyinForText(text = '') {
+  const h = normalizeHanzi(text);
+  if (!h) return '';
+  const chars = [...h];
+  const wordRow = db().prepare('SELECT pinyin FROM words WHERE hanzi=? AND pinyin IS NOT NULL');
+  const words = [];
+  let i = 0;
+  while (i < chars.length) {
+    let taken = null;
+    for (let len = Math.min(4, chars.length - i); len >= 2; len--) {
+      const cand = chars.slice(i, i + len).join('');
+      // A measure word binds LEFT to the number in front of it, so greedy matching
+      // must not swallow it into the following noun: 一个人 is 一+个 人, and taking
+      // 个人 ("individual") as the word produced "yí gèrén".
+      if (MEASURE.has(cand[0]) && NUMERAL.test(chars[i - 1] || '')) continue;
+      const row = wordRow.get(cand);
+      if (row?.pinyin) { taken = { syls: String(row.pinyin).trim().split(/\s+/), len }; break; }
+    }
+    if (!taken) {
+      const single = pinyinForHanzi(chars[i]);
+      taken = { syls: [contextualReading(chars, i, single)], len: 1 };
+    }
+    words.push(taken);
+    i += taken.len;
+  }
+  // Sandhi runs across the flattened syllable stream, then syllables regroup by word.
+  const flat = applySandhi(words.flatMap(w => w.syls));
+  const out = [];
+  let k = 0;
+  for (const w of words) { out.push(joinSyllables(flat.slice(k, k + w.syls.length).join(' '))); k += w.syls.length; }
+  return out.join(' ');
+}

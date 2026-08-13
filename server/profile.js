@@ -2,7 +2,7 @@
 // hook, choose examples the learner cares about, and steer gently — it is NEVER
 // surfaced to the learner as data. Everything lives in ./data/app.db; nothing
 // leaves the machine. Degrades to a heuristic harvester with no API key.
-import { db } from './db.js';
+import { db, getModel, setModel } from './db.js';
 import { hasApiKey, completeJson } from './anthropic.js';
 
 const now = () => new Date().toISOString();
@@ -104,4 +104,36 @@ function heuristicHarvest(line) {
     }
   }
   return n;
+}
+
+// ── What the learner actually talks about ───────────────────────────────────
+// The profile harvested facts but nothing used them to choose WHAT TO TEACH, which
+// is the personalisation that matters most in a language app: someone who keeps
+// mentioning their cat should be taught animal words, not whatever the frequency
+// list happens to serve next. Their own produced vocabulary is the honest signal —
+// it is what they reached for unprompted, not what they were shown.
+export function recordEngagement(words = []) {
+  const seen = getModel('engaged_words', {}) || {};
+  for (const w of words) {
+    if (!w) continue;
+    seen[w] = (seen[w] || 0) + 1;
+  }
+  // Keep the busiest 60 — enough to steer, small enough to stay cheap.
+  const trimmed = Object.fromEntries(
+    Object.entries(seen).sort((a, b) => b[1] - a[1]).slice(0, 60));
+  setModel('engaged_words', trimmed);
+  return trimmed;
+}
+
+export function engagedWords() { return getModel('engaged_words', {}) || {}; }
+
+// The words that should pull new vocabulary toward them: what the learner has used
+// more than once, plus anything their harvested interests name.
+export function interestAnchors(limit = 12) {
+  const engaged = Object.entries(engagedWords())
+    .filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).map(([w]) => w);
+  const fromProfile = getProfile()
+    .filter(r => r.confidence >= 0.4 && (r.kind === 'interest' || r.kind === 'preference'))
+    .map(r => String(r.value || ''));
+  return { engaged: engaged.slice(0, limit), interests: fromProfile.slice(0, 6) };
 }
