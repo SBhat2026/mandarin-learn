@@ -208,6 +208,26 @@ On load you pick a **user** ("who's here?" — up to 5 people, no auth; each has
 isolated progress). A header **gear** toggles the invisible-pass model (Haiku ⇄ Sonnet) for
 playtesting; a **chip** switches person.
 
+### Checking it still teaches — the level sweep
+
+```bash
+npm run diagnose            # drives a whole session as 5 learners, beginner → advanced
+npm run diagnose -- --levels 0,4
+```
+
+Nearly every bug this app has shipped was a **level** bug: correct for one learner and
+broken for another. The sweep seeds five learners, drives a real session for each, and
+runs the same probes across all of them — decodability, semantic sanity, arc
+completion, never-strand, reading coverage. Non-zero exit on any failure, so it works
+as a pre-deploy gate. See [docs/diagnostics.md](docs/diagnostics.md).
+
+### Tuning how Laoshi teaches Mandarin
+
+`server/mandarin.md` is the editable half of Laoshi's prompt: tones, measure words,
+aspect particles, and the errors English speakers make — gated by the learner's
+measured band and read at runtime. The conversational rules (who Laoshi is, turn shape,
+the JSON contract) stay in `server/qwen.js`. Edit the markdown, not the JavaScript.
+
 ### Sharing with a couple of testers
 
 ```bash

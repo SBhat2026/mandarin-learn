@@ -19,7 +19,7 @@ import { buildExercise, cleanGloss } from './exercises.js';
 import { weakTone, buildToneDrill } from './tone.js';
 import { liveCompletion, computeCalibration } from './momentum.js';
 import { currentRung, rungKnobs } from './rung.js';
-import { allowedSet, buildFrameTurn, groundTokens, beginnerNewWords, vocabToken, validateTurn, segment, coreSet, shortGloss, isNamable } from './vocabguard.js';
+import { allowedSet, buildFrameTurn, groundTokens, beginnerNewWords, vocabToken, validateTurn, segment, coreSet, shortGloss, isNamable, knownHanzi } from './vocabguard.js';
 import { classifyIntent, regroundReply, expressionGapReply } from './intent.js';
 import { graphNeighbors, graphSteer, nextConcepts } from './graphwalk.js';
 import { conversationProfile } from './level.js';
@@ -372,9 +372,34 @@ function guidedTurn({ id, s, ladder, userText, forceWrap }) {
     reply = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1, focusHanzi: focus?.hanzi });
   }
 
+  // A detour reply is TWO sentences: the human one ("没关系，我们慢慢来。" / "好问题！")
+  // and the frame that keeps the conversation moving. The guided UI renders the
+  // follow-up frame as the bubble's interlinear, which meant the human half — the
+  // reassurance a confused beginner most needs — was computed, returned, and never
+  // shown. Promote it to the lead-in slot, where it is rendered and grounded.
+  // The comfort line MOVES rather than being copied: leaving it in `hanzi` too meant
+  // the payload carried the same sentence twice, and any consumer rendering both
+  // (including the diagnostics harness) saw it doubled.
+  if (reply.followFrame && reply.hanzi && !reply.intro) {
+    reply.intro = { hanzi: reply.hanzi, pinyin: reply.pinyin, english: reply.english };
+    // `hanzi` and `tokens` must describe the SAME sentence, or a consumer that reads
+    // one and renders the other shows a mismatch. The frame is now the main line.
+    reply.hanzi = reply.followFrame.hanzi;
+    reply.pinyin = reply.followFrame.pinyin;
+    reply.english = reply.followFrame.english;
+    reply.tokens = reply.followFrame.tokens;
+  }
+
   // Ensure every teacher bubble is grounded word-by-word (§1.3), fade English per rung.
   reply.tokens = fadeTokens(reply.tokens || groundTokens(reply.hanzi, { newSet: new Set(sessionWords.filter(w => w.isNew).map(w => w.hanzi)) }), knobs);
   if (reply.followFrame) reply.followFrame.tokens = fadeTokens(reply.followFrame.tokens, knobs);
+  // The lead-in and the goodbye are Chinese sentences too. They were the only text in
+  // a guided turn shipped WITHOUT grounding — which meant the very first line of a
+  // beginner's first session (来，我们看几个东西。) and the last line of every session
+  // were unreadable to the one learner rung 0 exists for.
+  for (const k of ['intro', 'outro']) {
+    if (reply[k]?.hanzi) reply[k] = { ...reply[k], tokens: fadeTokens(groundTokens(reply[k].hanzi, {}), knobs) };
+  }
 
   const lastHanzi = (reply.followFrame?.hanzi) || reply.hanzi;
   const spentFrame = reply.frameId || reply.followFrame?.frameId;
@@ -470,8 +495,14 @@ function meetWord(w) {
 // English gloss (keeps pinyin); rung 2 uses reveal (handled on the free path).
 function fadeTokens(tokens, knobs) {
   if (!tokens) return tokens;
-  if (knobs.interlinear === 'partial') return tokens.map(t => ({ ...t, gloss: t.isNew ? t.gloss : '' }));
-  return tokens;
+  if (knobs.interlinear !== 'partial') return tokens;
+  // The fade is meant to wean the learner off ENGLISH for words they already have —
+  // not to blank the gloss on every word that merely isn't new this session. Keyed on
+  // `isNew` alone it stripped the meaning from exactly the words that needed one: the
+  // teacher's own scaffolding vocabulary (东西, 关系), which is neither known nor
+  // introduced, so a rung-1 learner met it with no English at all.
+  const known = new Set(knownHanzi());
+  return tokens.map(t => (t.isNew || !known.has(t.hanzi)) ? t : { ...t, gloss: '' });
 }
 
 // Content words (non function-word segments) in a teacher turn — the rough "what

@@ -8,6 +8,7 @@ import { pinyinForHanzi, glossForHanzi } from './pronunciation.js';
 import { buildBlueprint, buildBlueprintLocal } from './director.js';
 import { profileForPrompt } from './profile.js';
 import { conversationProfile } from './level.js';
+import { mandarinDoctrine } from './mandarin.js';
 import { recordSpend } from './spend.js';
 
 // Keep only Chinese characters (+ CJK punctuation) in the hanzi field, so a
@@ -65,7 +66,30 @@ async function chatOpenRouter(messages, { temperature = 0.6, max_tokens = 512, j
   // Some providers ignore reasoning.exclude and still answer inside `reasoning`.
   const text = String(msg.content ?? '').trim() || String(msg.reasoning ?? '').trim();
   if (!text) throw new Error('OpenRouter returned an empty completion');
+  // An EMPTY completion was already treated as a failure; a GARBAGE one was not, and
+  // that is the case a reasoning model actually produces. Asked for a teacher turn,
+  // `qwen3-235b-a22b` has returned `"encoding=utf-8"` and runs of digits — non-empty,
+  // so it sailed past the empty check and reached the learner as a broken bubble.
+  // Anything that cannot be what we asked for is a failure, and failing here means
+  // falling through to Ollama instead of shipping nonsense.
+  if (!plausibleCompletion(text, json)) {
+    throw new Error(`OpenRouter returned an unusable completion: ${text.slice(0, 60)}`);
+  }
   return { text, via: 'openrouter' };
+}
+
+// Cheap sanity gate on a completion. Deliberately permissive — it only rejects what
+// could not possibly be an answer, so a merely-poor turn still goes through the
+// normal repair path rather than being silently swapped for a different backend.
+function plausibleCompletion(text, json) {
+  if (text.length < 2) return false;
+  if (/^[\d.eE+\-]{20,}$/.test(text)) return false;              // runs of digits
+  if (/^"?[a-z]+=[^\s]+"?$/i.test(text)) return false;           // `encoding=utf-8`
+  if (json) {
+    const body = text.replace(/```json\s*/gi, '').replace(/```/g, '').trim();
+    if (!/[{[]/.test(body)) return false;                        // JSON was asked for
+  }
+  return true;
 }
 
 async function withTimeout(promise, ms) {
@@ -249,6 +273,10 @@ function executorSystem({ blueprint, stage = 'explore', knownWords = [], profile
     'EXPRESSION-GAP: if the learner asks in English how to say something (e.g. "how do I say I\'m tired?"), teach JUST that phrase simply — give it in hanzi+pinyin+english, invite them to try saying it, and then USE it yourself naturally in your very next line so it sticks.',
     'CIRCUMLOCUTION: if the learner is stuck for a word, FIRST encourage them to say it another way with words they already know ("用你会的词说说看"), and only then offer the target word and gently recast their sentence — training them not to freeze.',
     'RECAST: when they make a mistake, model the correct version naturally inside your reply (a gentle aside in "note" at most) — never grade or lecture.',
+    // Everything ABOVE this line is how to teach; everything in the doctrine is how to
+    // teach MANDARIN — tones, measure words, aspect, the errors English speakers make.
+    // Editable at server/mandarin.md, gated to the learner's measured band.
+    mandarinDoctrine(profile?.t ?? 0),
     'HARD RULES: never announce a lesson, a topic, or a "new word"; never present vocabulary as the subject; establish the personal connection before teaching; keep them talking — usually (not always) leave an easy opening for them to reply.',
     'NO FABRICATED HISTORY: never invent shared past events or personal facts that are not in the profile above or earlier in THIS conversation (no "did you go to…", "how was your weekend…", "last time you…"). With no real personal hook, open from the concrete here-and-now instead of a made-up memory.',
     'ALWAYS respond as strict JSON: {"hanzi":"...","pinyin":"...","english":"...","note":"optional short English tip/correction"}.',

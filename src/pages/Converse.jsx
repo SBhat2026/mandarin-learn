@@ -271,7 +271,7 @@ function TeacherBubble({ it, idx, scriptMode, hiddenAudio, onReveal, onChar, isL
           </button>
         ) : (
           <>
-            {it.intro?.hanzi && <IntroLine line={it.intro} />}
+            {it.intro?.hanzi && <IntroLine line={it.intro} interlinear={interlinear} />}
             {it.newWords?.length > 0 && <MeetWords words={it.newWords} />}
             {it.reground && (
               <div className="rounded-xl bg-amber-50/60 border border-amber-100 px-3 py-2">
@@ -282,7 +282,7 @@ function TeacherBubble({ it, idx, scriptMode, hiddenAudio, onReveal, onChar, isL
             {interlinear
               ? <Interlinear tokens={(it.followFrame?.tokens) || it.tokens} english={(it.followFrame?.english) || it.english} />
               : <TeacherText hanzi={it.hanzi} pinyin={it.pinyin} english={it.english} mode={scriptMode} onChar={onChar} onSpeak={() => speak(it.hanzi)} />}
-            {it.outro?.hanzi && <IntroLine line={it.outro} muted />}
+            {it.outro?.hanzi && <IntroLine line={it.outro} muted interlinear={interlinear} />}
             {it.note && <div className="text-[12px] text-jade-600 border-t border-line pt-2">💡 {it.note}</div>}
             {isLast && it.choices?.length > 0 && <Choices choices={it.choices} invite={it.invite} onChoose={onChoose} />}
           </>
@@ -292,11 +292,22 @@ function TeacherBubble({ it, idx, scriptMode, hiddenAudio, onReveal, onChar, isL
   );
 }
 
-// A small warm lead-in / send-off line (grounded, spoken on arrival).
-function IntroLine({ line, muted }) {
+// A small warm lead-in / send-off line. This is still Chinese, so at the guided rungs
+// it gets the same word-by-word treatment as everything else — it used to render
+// hanzi + English with NO pinyin, which made the first line a beginner ever sees the
+// one line they could not read.
+function IntroLine({ line, muted, interlinear }) {
+  if (interlinear && line.tokens?.length) {
+    return (
+      <div className={muted ? 'opacity-80' : ''}>
+        <Interlinear tokens={line.tokens} english={line.english} />
+      </div>
+    );
+  }
   return (
     <button onClick={() => speak(line.hanzi)} className={`block text-left ${muted ? 'opacity-80' : ''}`}>
       <span className="hanzi text-[15px] text-ink">{line.hanzi}</span>
+      {line.pinyin && <span className="text-[12px] text-jade-600 ml-2"><TonedPinyin pinyin={line.pinyin} /></span>}
       <span className="text-[12px] text-ink-faint ml-2">{line.english}</span>
     </button>
   );

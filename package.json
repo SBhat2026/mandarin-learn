@@ -29,7 +29,8 @@
     "ingest:units": "node ingest/build-units.js",
     "ingest:all": "node ingest/run-all.js",
     "dump:units": "node ingest/dump-units.js",
-    "test": "node --test"
+    "test": "node --test",
+    "diagnose": "node scripts/diagnose.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
