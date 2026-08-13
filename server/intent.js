@@ -5,7 +5,7 @@
 // "always find a way forward" rule: a confused or off turn still yields a next move.
 import { pinyinForHanzi } from './pronunciation.js';
 import { groundTokens } from './vocabguard.js';
-import { convertPinyin } from './pinyinime.js';
+import { convertPinyin, isConfidentPinyin } from './pinyinime.js';
 
 const CJK = /[一-鿿]/;
 const cjkCount = (s) => (String(s).match(/[一-鿿]/g) || []).length;
@@ -13,6 +13,16 @@ const latinCount = (s) => (String(s).match(/[a-zA-Z]/g) || []).length;
 
 const CONFUSION_RE = /\b(what|huh|confused|don'?t (get|understand)|no idea|help|lost|stuck|unclear|again)\b|[?？]{2,}|不懂|不明白|没听懂|听不懂|不知道|什么意思/i;
 const HOWDOISAY_RE = /how (?:do|to|can) (?:i|you|we)?\s*say\s+(.+)|how (?:do|to) (?:i|you) express\s+(.+)|怎么说|怎么讲/i;
+
+// ── Steering: the learner telling the teacher to change course ──────────────
+// These existed nowhere, so "No, I want to do something different" classified as
+// `normal` — indistinguishable from producing a Chinese sentence — and the arc
+// marched on with the same words. A learner said it TWICE in a row and was drilled
+// on 高中 both times. A teacher who cannot be redirected is not teaching the person
+// in front of them, they are performing a lesson plan.
+const REDIRECT_RE = /\b(something else|something different|different (thing|topic|word)|change (the )?(topic|subject)|another (topic|subject|word)|move on|talk about something|not this|boring|bored|sick of|tired of)\b|别的|换一个|换个话题|没意思|无聊/i;
+const TOOEASY_RE = /\b(too easy|already know( this| that| it)?|this is easy|i know this|harder|too simple|too slow)\b|太简单|太容易|我知道了|难一点/i;
+const TOOHARD_RE = /\b(too hard|too difficult|too fast|slow down|too much|can'?t keep up|easier)\b|太难|太快|慢一点|简单一点/i;
 
 // Extract the thing the learner wants to say, from a "how do I say X" input.
 function extractGap(text) {
@@ -33,6 +43,13 @@ export function classifyIntent(text = '', { prevTeacherHanzi = '' } = {}) {
   const gap = t.match(HOWDOISAY_RE);
   if (gap) return { kind: 'howdoisay', phrase: extractGap(t) || null, text: t };
 
+  // Steering beats every other reading of the turn. "I want to do something
+  // different" contains no Chinese and no question mark, so it used to fall through
+  // to `normal` and be absorbed as if the learner had answered the question.
+  if (REDIRECT_RE.test(t)) return { kind: 'redirect', text: t };
+  if (TOOHARD_RE.test(t)) return { kind: 'toohard', text: t };
+  if (TOOEASY_RE.test(t)) return { kind: 'tooeasy', text: t };
+
   if (CONFUSION_RE.test(t) && zh === 0) return { kind: 'confused', text: t };
 
   // Mostly-English content with a question mark, and not Chinese → English meta.
@@ -47,9 +64,12 @@ export function classifyIntent(text = '', { prevTeacherHanzi = '' } = {}) {
   // 猫, not a shrug. Treating it as a stall re-grounded the learner for answering
   // correctly and stalled the arc on the exact input the app now asks them for.
   if (zh === 0 && lat) {
-    const conv = convertPinyin(t);
-    if (conv.ok || conv.isPinyin) return { kind: 'normal', text: t, script: 'pinyin' };
+    if (isConfidentPinyin(t)) return { kind: 'normal', text: t, script: 'pinyin' };
     if (lat <= 3) return { kind: 'stall', text: t };
+    // Latin prose that is NOT pinyin is the learner talking TO the teacher in
+    // English. Treating it as a Chinese attempt (which it was, briefly) meant every
+    // aside got graded and recast into nonsense.
+    return { kind: 'meta', text: t };
   }
 
   return { kind: 'normal', text: t };

@@ -18,6 +18,7 @@ export default function Converse({ onFallback }) {
   const [level, setLevel] = useState(0);
   const [done, setDone] = useState(false);
   const [excursion, setExcursion] = useState(null);
+  const [goal, setGoal] = useState(null);
   const [popover, setPopover] = useState(null);
   const [revealed, setRevealed] = useState({});
   const [ime, setIme] = useState(null);          // live pinyin→hanzi conversion preview
@@ -100,6 +101,11 @@ export default function Converse({ onFallback }) {
           invite: reply.invite, rung: reply.rung, knobs: reply.knobs, audioFirst: reply.audioFirst,
           modelAnswer: reply.modelAnswer,
         });
+        return next;
+      });
+      if (reply.goal) setGoal(reply.goal);
+      setItems(prev => {
+        const next = [...prev];
         if (reply.inlineRep) next.push({ type: 'rep', rep: reply.inlineRep });
         return next;
       });
@@ -195,10 +201,17 @@ export default function Converse({ onFallback }) {
 
   return (
     <div className="flex flex-col h-[calc(100vh-9rem)] animate-fade" onClick={() => popover && setPopover(null)}>
-      <div className="flex items-center gap-2 mb-3">
+      <div className="flex items-center gap-2 mb-1">
         <span className="hanzi text-2xl text-ink">老师</span>
         <span className="text-sm text-ink-soft">{session?.hasThread ? 'picking up where you left off' : 'Laoshi'}</span>
       </div>
+      {/* A soft aim, not a task. A conversation you can see the point of is one you
+          can steer toward — without it a guided session read as unrelated facts. */}
+      {goal && (
+        <div className="mb-3 text-[12px] text-ink-faint">
+          今天 · <span className="text-ink-soft">{goal.en}</span>
+        </div>
+      )}
 
       <div ref={scroller} className="flex-1 overflow-y-auto space-y-3 pr-1">
         {items.map((it, i) => {

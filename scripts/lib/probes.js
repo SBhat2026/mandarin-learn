@@ -392,7 +392,55 @@ export function strictnessRises({ turns, level }) {
   };
 }
 
+// A conversation is an exchange, not a broadcast. The guided rungs used to emit pure
+// statements — "这是屋。" "我有电脑。" — five turns in a row, nothing asked, nothing
+// picked up from the learner. This checks that most turns actually invite a reply and
+// that the teacher refers back to what the learner said.
+export function invitesResponse({ turns }) {
+  // The closing beats are exempt: a recombination win and a goodbye are supposed to
+  // land, not interrogate. Everything in the conversational middle must ask.
+  const CLOSERS = new Set(['win', 'farewell']);
+  const speaking = turns.filter(t => t.reply?.hanzi && !t.reply?.shouldWrap && !CLOSERS.has(t.reply?.beat));
+  if (!speaking.length) return { ok: true, severity: 'warn', detail: 'no turns', evidence: [], skipped: true };
+  const asks = speaking.filter(t => /[？?]/.test(t.reply.hanzi) || /吗|呢|什么|几|谁|哪|怎么样|为什么/.test(t.reply.hanzi));
+  const ratio = asks.length / speaking.length;
+  return {
+    ok: ratio >= 0.6, severity: 'fail',
+    detail: `${asks.length}/${speaking.length} turns invited a reply (${Math.round(ratio * 100)}%)`,
+    evidence: speaking.filter(t => !asks.includes(t)).slice(0, 3).map(t => `turn ${t.i}: "${t.reply.hanzi}" — states, asks nothing`),
+  };
+}
+
+// Does the teacher pick up what the learner actually said? Without this the turns can
+// all end in a question and still be a script being read at someone.
+export function picksUpLearner({ turns }) {
+  const pairs = turns.filter(t => t.userText && !t.wasConfusion && t.reply?.hanzi);
+  if (!pairs.length) return { ok: true, severity: 'warn', detail: 'no learner turns', evidence: [], skipped: true };
+  const echoed = pairs.filter(t => {
+    const said = [...String(t.userText)].filter(c => /[一-鿿]/.test(c));
+    return said.length && said.some(ch => t.reply.hanzi.includes(ch));
+  });
+  const ratio = echoed.length / pairs.length;
+  return {
+    ok: ratio >= 0.3, severity: 'warn',
+    detail: `${echoed.length}/${pairs.length} replies reused something the learner said (${Math.round(ratio * 100)}%)`,
+    evidence: [],
+  };
+}
+
+// Every session should be aimed at something the learner can see.
+export function hasGoal({ turns, rung }) {
+  if (rung >= 2) return { ok: true, severity: 'warn', detail: 'free rung — no stated aim', evidence: [], skipped: true };
+  const withGoal = turns.filter(t => t.reply?.goal?.en);
+  return {
+    ok: withGoal.length > 0, severity: 'fail',
+    detail: withGoal.length ? `session aim: "${withGoal[0].reply.goal.en}"` : 'no session aim was offered',
+    evidence: [],
+  };
+}
+
 export const CONVERSATION_PROBES = [
+  ['invites-response', invitesResponse], ['picks-up-learner', picksUpLearner], ['has-goal', hasGoal],
   ['no-choices', noChoices], ['model-answer', modelAnswerAvailable],
   ['correction', correction], ['strictness', strictnessRises],
   ['blank-turns', blankTurns], ['grounding', grounding], ['decodability', decodability],

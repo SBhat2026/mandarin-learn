@@ -15,7 +15,7 @@ import { db } from './db.js';
 import { pinyinForHanzi, glossForHanzi } from './pronunciation.js';
 import { knownWordIds } from './planner.js';
 import { newCandidates } from './planner.js';
-import { imageFor, EVERYDAY_KEYWORDS } from './images.js';
+import { imageFor, picturableHead, EVERYDAY_KEYWORDS } from './images.js';
 
 const CJK = /[一-鿿]/;
 const isCjk = (c) => CJK.test(c);
@@ -37,7 +37,13 @@ const CORE_RUNG0 = ['我', '你', '他', '她', '它', '这', '那', '是', '不
   '你好', '谢谢', '再见', '对', '请问', '吧'];
 const CORE_RUNG1 = [...CORE_RUNG0, '们', '谁', '哪', '哪个', '得', '还是',
   '要', '会', '来', '说',
-  '很多', '一点', '现在', '明天', '昨天', '因为', '所以', '但是', '觉得', '可以', '真'];
+  '很多', '一点', '现在', '明天', '昨天', '因为', '所以', '但是', '觉得', '可以', '真',
+  // Added 2026-08-13 when the guided rungs started composing real turns instead of
+  // filling templates. These are HSK-1 glue a conversation cannot happen without —
+  // "什么" and "还" are how you ask a follow-up, 家/里 are where everything is, 名字
+  // and 为什么 are how you take an interest in someone. Without them the model had to
+  // either leak them (a decodability failure) or fall back to "你有X吗？" forever.
+  '家', '里', '还', '为什么', '名字', '叫', '几个', '怎么样', '一起', '给', '做'];
 
 // Clean interlinear glosses for the core function words (the dictionary gloss for
 // these is noisy). Content words fall through to glossForHanzi.
@@ -164,8 +170,16 @@ function scrub(sense) {
     .replace(/\s+/g, ' ')
     .trim();
 }
+// Dictionary bookkeeping that is not a meaning. CEDICT's first sense is regularly one
+// of these, and they were reaching the learner as the gloss under a word: 还有 showed
+// "surname Huan" (while the pinyin correctly said hái yǒu), 词 showed "old variant of
+// 詞|词[ci2", 屋 is flagged "(bound form)". A gloss that describes the DICTIONARY
+// rather than the world teaches nothing.
+const NON_MEANING = /^(surname\b|old variant|variant of|abbr\.? for|used in|see [A-Z]|bound form)/i;
+
 function senseScore(s) {
   if (!s) return -99;
+  if (NON_MEANING.test(s.trim())) return -50;         // never the gloss, if anything else exists
   const words = s.toLowerCase().split(/\s+/);
   let score = 0;
   for (const w of words) {
@@ -183,8 +197,10 @@ function cleanShort(g) {
   if (!senses.length) return '';
   let best = senses[0], bestScore = senseScore(senses[0]);
   // Only the first few senses are candidates — deep in the list is where the truly
-  // obscure readings live.
-  for (const s of senses.slice(1, 4)) {
+  // obscure readings live. Widened to 6 when the early ones are all dictionary
+  // bookkeeping, so a real meaning further down can still be reached.
+  const depth = senses.slice(0, 3).every(s => NON_MEANING.test(s.trim())) ? 6 : 4;
+  for (const s of senses.slice(1, depth)) {
     const sc = senseScore(s);
     if (sc > bestScore) { best = s; bestScore = sc; }
   }
@@ -469,7 +485,7 @@ export function beginnerNewWords(n = 3, { introduced } = {}) {
   // noun+concrete words only if we couldn't find enough picturable ones.
   const picturableTier = [], nounTier = [];
   for (const c of cands) {
-    const w = db().prepare('SELECT hanzi, freq_rank, concrete, particle, pos, gloss, english FROM words WHERE id=?').get(c.id);
+    const w = db().prepare('SELECT hanzi, freq_rank, hsk_level, concrete, particle, pos, gloss, english FROM words WHERE id=?').get(c.id);
     if (!w || w.particle || core.has(w.hanzi)) continue;
     const charLen = [...w.hanzi].filter(isCjk).length;
     if (charLen > 2) continue;                                  // low character load
@@ -486,9 +502,20 @@ export function beginnerNewWords(n = 3, { introduced } = {}) {
     // this level: with only these frames the talk becomes "is this your foot? do you
     // like your face?". They are still taught through reading and reps.
     if (nounCategory({ hanzi: w.hanzi, gloss }) === 'body') continue;
-    const img = imageFor(w.hanzi);
-    if (img.kind !== 'none') picturableTier.push({ id: c.id, hanzi: w.hanzi, score: c.score + (charLen === 1 ? 0.6 : 0), picturable: true });
-    else if ((w.concrete ?? 0) >= 2) nounTier.push({ id: c.id, hanzi: w.hanzi, score: c.score, picturable: false });
+    // HSK level is the best "would a human teach this first?" signal in the data —
+    // it is a curated syllabus, not a corpus artifact. Without it the picturable tier
+    // happily served 市民 "city resident" (HSK5), 好友 "close friend" (HSK4, where
+    // 朋友 is the ordinary word) and 高中 (HSK2) to absolute beginners, because each
+    // one matched an emoji. Beginner words must be HSK 1–2, strongly preferring 1.
+    const hsk = w.hsk_level ?? null;
+    if (hsk != null && hsk > 2) continue;
+    const hskBonus = hsk === 1 ? 1.2 : hsk === 2 ? 0.3 : 0;
+    // The emoji must depict the word itself, not a modifier in its gloss.
+    if (picturableHead(cleanShort(w.gloss || w.english || '')) || imageFor(w.hanzi).kind === 'url') {
+      picturableTier.push({ id: c.id, hanzi: w.hanzi, score: c.score + hskBonus + (charLen === 1 ? 0.6 : 0), picturable: true });
+    } else if ((w.concrete ?? 0) >= 2) {
+      nounTier.push({ id: c.id, hanzi: w.hanzi, score: c.score + hskBonus, picturable: false });
+    }
   }
   picturableTier.sort((a, b) => b.score - a.score);
   nounTier.sort((a, b) => b.score - a.score);
@@ -510,4 +537,46 @@ export function vocabToken(wordId) {
     audioRef: w.audio_path || null,
     imageRef: img.kind !== 'none' ? img : null,
   };
+}
+
+// ── Model-composed beginner turns ───────────────────────────────────────────
+// Rungs 0/1 used to be templates only, which is why a guided session read as a list
+// of facts — five turns of "你有X吗？" in a row, never referring to anything the
+// learner had said. Templates guarantee decodability but cannot hold a conversation.
+//
+// So the model composes, and this module still holds the line: the turn is validated
+// against the allowed set, gets exactly ONE repair pass naming what leaked, and falls
+// back to the template if it still drifts or if no backend is reachable. The offline
+// guarantee is unchanged — a turn always exists.
+export function beginnerPrompt({ goal, allowed, sessionWords, userText, history = [], push = 'gentle' }) {
+  const vocab = [...allowed].join(' ');
+  const focus = sessionWords.map(w => `${w.hanzi} (${w.gloss || ''})`).join(', ');
+  const recent = history.slice(-4).map(m => `${m.role === 'user' ? 'learner' : '老师'}: ${m.content}`).join('\n');
+  const PUSH = {
+    gentle: 'If they answer with only one word, that is FINE — accept it warmly and keep going. Do not push for more.',
+    shaping: 'If they answer with only one word, accept it, then ask one small follow-up that invites a longer answer.',
+    firm: 'If they answer briefly, follow up until they say something real — ask 为什么 or 什么 or 怎么样 about their own answer.',
+    exacting: 'Expect a full sentence. Follow up on what they said, ask for a reason or a detail, and keep the thread going.',
+  };
+  return `You are 老师, having a real conversation with a BEGINNER learner of Mandarin.
+
+THE AIM OF THIS CONVERSATION: ${goal}. Move toward it, but follow the learner.
+TODAY'S WORDS: ${focus}
+
+${recent ? `The conversation so far:\n${recent}\n` : ''}${userText ? `The learner just said: "${userText}"` : 'Open the conversation.'}
+
+HARD VOCABULARY LIMIT — use ONLY these words, nothing else. This is absolute:
+${vocab}
+
+Write ONE short turn (1–2 sentences, under 16 characters) that:
+- REACTS to what they just said before anything else — never ignore it
+- ENDS BY ASKING THEM SOMETHING, so they have a reason to reply
+- trades information: tell them something small about you, or ask about them
+- ${PUSH[push] || PUSH.gentle}
+
+NEVER just state a fact about an object. "这是书。" is what we are replacing — it
+tells them nothing and invites nothing.
+
+Reply as strict JSON: {"hanzi":"...","pinyin":"...","english":"..."}
+"hanzi" is Chinese characters only; "pinyin" carries tone marks and matches it exactly.`;
 }

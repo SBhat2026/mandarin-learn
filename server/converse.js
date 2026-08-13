@@ -9,7 +9,7 @@ import { db, getModel, setModel, getSetting } from './db.js';
 import { buildLessonPlan } from './neighborhood.js';
 import { buildBlueprint, buildBlueprintLocal } from './director.js';
 import { profileForPrompt } from './profile.js';
-import { laoshiConverse, conversationStage } from './qwen.js';
+import { laoshiConverse, conversationStage, chat, available as qwenAvailable } from './qwen.js';
 import { knownWordIds, introducedWordIds } from './planner.js';
 import { createCardsForWord } from './cards.js';
 import { scriptDirective, scriptLevel, presentationBias } from './learner.js';
@@ -19,8 +19,8 @@ import { buildExercise, cleanGloss } from './exercises.js';
 import { weakTone, buildToneDrill } from './tone.js';
 import { liveCompletion, computeCalibration } from './momentum.js';
 import { currentRung, rungKnobs, recordProductionOutcome } from './rung.js';
-import { evaluateProduction, recastLine, recastDirective } from './correction.js';
-import { allowedSet, buildFrameTurn, groundTokens, beginnerNewWords, vocabToken, validateTurn, segment, coreSet, shortGloss, isNamable, knownHanzi } from './vocabguard.js';
+import { evaluateProduction, recastLine, recastDirective, strictness } from './correction.js';
+import { allowedSet, buildFrameTurn, groundTokens, beginnerNewWords, vocabToken, validateTurn, segment, coreSet, shortGloss, isNamable, knownHanzi, beginnerPrompt } from './vocabguard.js';
 import { classifyIntent, regroundReply, expressionGapReply } from './intent.js';
 import { graphNeighbors, graphSteer, nextConcepts } from './graphwalk.js';
 import { conversationProfile } from './level.js';
@@ -92,7 +92,8 @@ function seedSessionWords(plan) {
   const callback = getModel('last_session_words', []) || [];
   const spin = getModel('callback_spin', 0) || 0;
   if (callback.length) setModel('callback_spin', (spin + 1) % Math.max(1, callback.length));
-  const rotated = callback.length ? [callback[spin % callback.length]] : [];
+  const rejectedSeed = rejectedHanzi();
+  const rotated = callback.length ? [callback[spin % callback.length]].filter(h => !rejectedSeed.has(h)) : [];
   let anchorId = null;
   for (const h of rotated) {
     const row = db().prepare('SELECT id FROM words WHERE hanzi=?').get(h);
@@ -105,8 +106,10 @@ function seedSessionWords(plan) {
   // Also guard against repeating YESTERDAY's meaning under a different word (钱 then
   // 金钱, both "money") — that reads as the app going in circles.
   const recent = recentlyTaught();
+  const rejected = rejectedHanzi();
   for (const w of connectedBeginnerCluster(introduced, anchorId, 8)) {
     if (seen.has(w.hanzi)) continue;
+    if (rejected.has(w.hanzi)) continue;                          // they said no to this once
     if (tooSimilar(w, out)) continue;                             // never 车 + 火车 in one sitting
     if (tooSimilar(w, recent, { chars: false })) continue;        // nor last week's meaning again
     out.push({ ...w, isNew: true }); seen.add(w.hanzi);
@@ -124,6 +127,41 @@ function seedSessionWords(plan) {
   return picked;
 }
 
+// Words the learner has explicitly rejected ("something else", "boring"). A topic
+// turned down once must not come back — not later in the session, and not as
+// tomorrow's cross-session callback. This is the difference between a teacher who
+// heard you and a lesson plan that happens to be running near you.
+function rejectedHanzi() { return new Set(getModel('rejected_words', []) || []); }
+function rejectWords(words = []) {
+  const set = rejectedHanzi();
+  for (const w of words) if (w?.hanzi) set.add(w.hanzi);
+  setModel('rejected_words', [...set].slice(-40));
+  // Drop them from the callback seed too, or tomorrow opens on the very thing they
+  // asked to get away from — which is exactly how 高中 kept coming back.
+  const callback = (getModel('last_session_words', []) || []).filter(h => !set.has(h));
+  setModel('last_session_words', callback);
+  return set;
+}
+
+// Swap the session onto a genuinely different set of words, mid-conversation. Used
+// when the learner asks for something else: the arc restarts at `meet` with a new
+// cluster rather than grinding on.
+function reseedSessionWords(sessionWords) {
+  const rejected = rejectWords(sessionWords);
+  const introduced = introducedWordIds();
+  const avoid = [...sessionWords, ...recentlyTaught()];
+  const out = [];
+  for (const cand of connectedBeginnerCluster(introduced, null, 24)) {
+    if (rejected.has(cand.hanzi)) continue;
+    if (tooSimilar(cand, avoid)) continue;
+    if (tooSimilar(cand, out)) continue;
+    if (cand.wordId) createCardsForWord(cand.wordId);
+    out.push({ ...cand, isNew: true });
+    if (out.length >= 2) break;
+  }
+  return out.length ? out : null;
+}
+
 // Mid-conversation growth: ONE further word, graph-connected to what's already in
 // play and NOT already in the session. This is what makes a guided conversation
 // travel — without it the whole arc is spent on the words chosen at turn zero.
@@ -131,7 +169,9 @@ function growSessionWord(sessionWords) {
   const introduced = introducedWordIds();
   const anchorId = sessionWords.find(w => w.wordId)?.wordId ?? null;
   const recent = recentlyTaught();
+  const rejected = rejectedHanzi();
   for (const cand of connectedBeginnerCluster(introduced, anchorId, 10)) {
+    if (rejected.has(cand.hanzi)) continue;
     if (tooSimilar(cand, sessionWords)) continue;
     if (tooSimilar(cand, recent, { chars: false })) continue;
     if (cand.wordId) createCardsForWord(cand.wordId);
@@ -288,9 +328,105 @@ export async function conversationTurn({ id, userText = '', history = [], forceW
   if (correction) recordProductionOutcome({ accepted: correction.accepted, aside: correction.aside });
 
   const reply = (rung < 2 && ladder && ladder.sessionWords?.length)
-    ? guidedTurn({ id, s, ladder, userText, forceWrap, correction })
+    ? await guidedTurn({ id, s, ladder, userText, forceWrap, correction })
     : await freeTurn({ id, s, userText, history, forceWrap, extWrap, correction });
   return reply;
+}
+
+// ── Composed beginner turns ─────────────────────────────────────────────────
+// The conversational beats of the arc now ask the model for a real turn instead of
+// filling a template. Measured head-to-head (`npm run bakeoff`) the templates
+// produced "你有X吗？" for five turns running while the model reacted to what the
+// learner said and asked something back; Qwen matched Claude on this task at ~2.3×
+// the speed and a fraction of the cost, so Qwen composes.
+//
+// Everything the templates guaranteed still holds: the turn is validated against the
+// allowed set, gets ONE repair pass naming what leaked, and falls back to the frame
+// if it drifts again or no backend is reachable.
+// `combine` and the structural beats (meet/grow/win/farewell) stay deterministic:
+// they carry guarantees — introduce a word, land the payoff, actually end — that a
+// model must not be able to skip. These three are the conversational middle.
+const COMPOSED_BEATS = new Set(['identify', 'relate', 'use']);
+// What "invites a reply" means, in code — the same test the diagnostics probe uses.
+const ASKS = /[？?]|吗|呢|什么|几|谁|哪|怎么样|为什么/;
+
+async function composeGuidedTurn({ goal, sessionWords, userText, rung, history, push }) {
+  if (!(await qwenAvailable())) return null;
+  const allowed = allowedSet({ rung, sessionWords });
+  const base = beginnerPrompt({ goal, allowed, sessionWords, userText, history, push });
+  let leaks = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let reply;
+    try {
+      reply = await laoshiCompose(attempt === 0 ? base
+        : `${base}\n\nYour last attempt used words that are NOT on the list: ${leaks}. Rewrite using ONLY the list.`);
+    } catch { return null; }
+    if (!reply?.hanzi) return null;
+    // A turn that asks nothing is the exact failure we replaced templates to escape,
+    // so it is not worth keeping merely because a model wrote it. The frames always
+    // ask; rejecting here means the fallback is strictly better than what we discard.
+    if (!ASKS.test(reply.hanzi)) {
+      if (attempt === 1) return null;
+      leaks = '(that stated a fact and asked nothing — it MUST end by asking them something)';
+      console.log('[guided] composed turn asked nothing — repairing');
+      continue;
+    }
+    const { ok, violations } = validateTurn(reply.hanzi, allowed);
+    if (ok) return reply;
+    if (attempt === 1) return null;                     // drifted twice → use the frame
+    leaks = violations.join(' ');
+    console.log(`[guided] composed turn leaked ${leaks} — repairing`);
+  }
+  return null;
+}
+
+async function laoshiCompose(prompt) {
+  const r = await chat([
+    { role: 'system', content: 'You write short beginner Mandarin conversation turns. Output strict JSON only.' },
+    { role: 'user', content: prompt },
+  ], { temperature: 0.7, max_tokens: 260, json: true, kind: 'guided' });
+  const body = String(r.text || '').replace(/```json\s*/gi, '').replace(/```/g, '').trim();
+  try {
+    const o = JSON.parse(body.slice(body.indexOf('{'), body.lastIndexOf('}') + 1));
+    if (!o?.hanzi) return null;
+    return { hanzi: String(o.hanzi), pinyin: String(o.pinyin || '') || pinyinForHanzi(String(o.hanzi)), english: String(o.english || '') };
+  } catch { return null; }
+}
+
+// The session's aim, in one plain line. Shown to the learner (a soft aim, not a task)
+// because a conversation you can see the point of is one you can steer toward — the
+// old sessions had a hidden arc and read as a sequence of unrelated facts.
+function sessionGoal(sessionWords, plan) {
+  // Include a word grown mid-session: the aim should describe where the conversation
+  // actually went, not only where it started.
+  const names = sessionWords.filter(w => w.gloss).map(w => shortGloss(w.gloss)).slice(0, 3);
+  if (!names.length) return { en: 'have a short chat in Chinese', zh: '聊聊天' };
+  return {
+    en: `talk about ${names.join(' and ')}`,
+    zh: `聊聊${sessionWords.slice(0, 3).map(w => w.hanzi).join('、')}`,
+    capability: plan?.capability?.name || null,
+  };
+}
+
+// The free rung has no frames to swap, so steering reaches it as a directive. The
+// blueprint is a plan, not a contract with the learner — when they ask for something
+// else, the plan is what gives way.
+function steerDirective(userText) {
+  const kind = classifyIntent(String(userText || '')).kind;
+  if (kind === 'redirect') {
+    return 'The learner has just asked to talk about something ELSE. Acknowledge it warmly in one short '
+      + 'line and then genuinely change the subject — a different topic, not a rephrasing of the same one. '
+      + 'Do not return to what you were discussing.';
+  }
+  if (kind === 'toohard') {
+    return 'The learner says this is too hard or too fast. Slow down: shorter sentences, simpler words, '
+      + 'and one idea per turn. Say something reassuring first.';
+  }
+  if (kind === 'tooeasy') {
+    return 'The learner says this is too easy. Step up: longer turns, a less common word or two, and a '
+      + 'question that needs a real answer rather than a yes/no.';
+  }
+  return '';
 }
 
 // Grade one learner turn against the sentence the previous teacher turn invited.
@@ -318,9 +454,10 @@ function gradeProduction({ userText, ladder, rung }) {
 const ARC = ['meet', 'identify', 'relate', 'grow', 'use', 'combine', 'win', 'farewell'];
 const HARD_CEILING = 10;                    // absolute backstop, arc normally ends first
 
-function guidedTurn({ id, s, ladder, userText, forceWrap, correction = null }) {
+async function guidedTurn({ id, s, ladder, userText, forceWrap, correction = null }) {
   const knobs = rungKnobs(ladder.rung);
   const { plan } = s;
+  const prof = conversationProfile();
   let sessionWords = ladder.sessionWords || [];
   const opening = !userText;
   const exchanges = s.exchanges + (opening ? 0 : 1);
@@ -333,6 +470,35 @@ function guidedTurn({ id, s, ladder, userText, forceWrap, correction = null }) {
   let stuck = ladder.stuck ?? 0;
   const detour = !opening && intent.kind !== 'normal';
   if (detour) stuck += 1; else stuck = 0;
+
+  // ── The learner steering ────────────────────────────────────────────────
+  // "I want to do something different" used to classify as `normal`, so the arc
+  // absorbed it as an answer and carried on with the same nouns. Someone said it
+  // twice and got drilled on 高中 both times. A steer is not a detour to be
+  // waited out: it changes what the session IS.
+  let steered = null;
+  if (intent.kind === 'redirect') {
+    const fresh = reseedSessionWords(sessionWords);
+    if (fresh) {
+      sessionWords = fresh;
+      beatIdx = ARC.indexOf('meet');            // a new topic starts at the beginning
+      stuck = 0;
+      steered = 'redirect';
+    } else {
+      // Nothing else to offer is still worth SAYING, rather than pretending the
+      // request was never made.
+      steered = 'redirect-exhausted';
+    }
+  } else if (intent.kind === 'tooeasy') {
+    // Bored is a real signal about difficulty. Bring the new word in NOW instead of
+    // waiting for the `grow` beat, and let the ladder know they are under-stretched.
+    beatIdx = Math.max(beatIdx, ARC.indexOf('grow'));
+    steered = 'tooeasy';
+  } else if (intent.kind === 'toohard') {
+    beatIdx = Math.max(0, Math.min(beatIdx, ARC.indexOf('identify')));
+    steered = 'toohard';
+  }
+
   // The learner asked to stop → say goodbye now, properly. The arc's remaining
   // beats are not worth trapping someone in.
   if (forceWrap) beatIdx = ARC.indexOf('farewell');
@@ -340,6 +506,9 @@ function guidedTurn({ id, s, ladder, userText, forceWrap, correction = null }) {
   const beat = ARC[Math.min(beatIdx, ARC.length - 1)];
   const usedFrames = ladder.usedFrames || [];
   const wrap = beat === 'farewell';
+  // The session's aim, recomputed after any steer so a redirected session gets a new
+  // one rather than advertising the topic the learner just turned down.
+  const goal = sessionGoal(sessionWords, plan);
 
   let reply, newWord = null;
   const frameArgs = { rung: ladder.rung, sessionWords, exclude: usedFrames };
@@ -363,7 +532,24 @@ function guidedTurn({ id, s, ladder, userText, forceWrap, correction = null }) {
       tokens: groundTokens('我们用中文说说看。', {}) };
     reply.followFrame = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex });
     reply.choices = reply.followFrame?.choices || [];
-  } else if (detour) {                       // confused / stall
+  } else if (steered === 'redirect') {
+    // Say yes, out loud, and then actually be somewhere else. The acknowledgement
+    // matters as much as the swap: being redirected in silence still reads as not
+    // having been heard.
+    reply = {
+      ...buildFrameTurn({ rung: ladder.rung, sessionWords, turnIndex: 0, prefer: 'this-is', exclude: [] }),
+      intro: { hanzi: '好，那我们说别的。', pinyin: 'Hǎo, nà wǒmen shuō biéde.', english: "Sure — let's talk about something else." },
+      newWords: sessionWords.map(meetWord),
+    };
+  } else if (steered === 'redirect-exhausted') {
+    reply = { hanzi: '好，我们换个说法。', pinyin: 'Hǎo, wǒmen huàn ge shuōfa.', english: "OK — let's come at it a different way.",
+      tokens: groundTokens('好，我们换个说法。', {}) };
+    reply.followFrame = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 3 });
+  } else if (steered === 'toohard') {
+    reply = regroundReply({ prevTeacherHanzi: ladder.lastTeacherHanzi, sessionWords });
+    reply.intro = { hanzi: '好，我们慢一点。', pinyin: 'Hǎo, wǒmen màn yìdiǎn.', english: "OK — let's take it slower." };
+    reply.followFrame = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex, prefer: 'this-is-q' });
+  } else if (detour && intent.kind !== 'tooeasy') {   // confused / stall
     reply = regroundReply({ prevTeacherHanzi: ladder.lastTeacherHanzi, sessionWords });
     const frame = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex, prefer: 'this-is-q' });
     reply.followFrame = frame;
@@ -381,7 +567,9 @@ function guidedTurn({ id, s, ladder, userText, forceWrap, correction = null }) {
       sessionWords = [...sessionWords, newWord];
       reply = {
         ...buildFrameTurn({ rung: ladder.rung, sessionWords, turnIndex: 0, focusHanzi: newWord.hanzi, prefer: 'this-is', exclude: [] }),
-        intro: { hanzi: '还有一个词。', pinyin: 'Hái yǒu yí ge cí.', english: "Here's one more." },
+        intro: steered === 'tooeasy'
+          ? { hanzi: '好，那来个新的。', pinyin: 'Hǎo, nà lái ge xīn de.', english: "OK — here's a new one then." }
+          : { hanzi: '还有一个词。', pinyin: 'Hái yǒu yí ge cí.', english: "Here's one more." },
         newWords: [meetWord(newWord)],
       };
     } else {
@@ -393,10 +581,27 @@ function guidedTurn({ id, s, ladder, userText, forceWrap, correction = null }) {
     reply = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1, pair: true })
       || buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1 });
   } else {
-    // identify / use / relate: rotate focus so each word recurs (within-session
-    // spacing) but never repeat a frame the session already used.
+    // identify / use / relate: the CONVERSATIONAL beats. The model composes a turn
+    // that reacts to what the learner just said and asks something back; the frame is
+    // the fallback, not the default. Rotate focus so each word still recurs.
     const focus = sessionWords.length ? sessionWords[(beatIdx + 1) % sessionWords.length] : null;
-    reply = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1, focusHanzi: focus?.hanzi });
+    let frame = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1, focusHanzi: focus?.hanzi });
+    const composed = COMPOSED_BEATS.has(beat)
+      ? await composeGuidedTurn({ goal: goal.en, sessionWords, userText, rung: ladder.rung,
+          history: ladder.history || [], push: strictness(prof.t, ladder.rung).band })
+      : null;
+    // The fallback has to clear the same bar as the thing it replaces. Half the frames
+    // are statements ("我有钱。"), and falling back to one turned a conversational beat
+    // back into the broadcast we are trying to get rid of — so on these beats, insist
+    // the frame asks something too.
+    if (!composed && frame && !ASKS.test(frame.hanzi)) {
+      frame = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1, focusHanzi: focus?.hanzi, prefer: 'this-is-q' })
+        || buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex, prefer: 'do-you-like-q' })
+        || frame;
+    }
+    // Keep the frame's choices/frameId bookkeeping even when the model wrote the
+    // words, so within-session frame rotation and the model answer still work.
+    reply = composed ? { ...frame, ...composed, composed: true } : frame;
   }
 
   // A detour reply is TWO sentences: the human one ("没关系，我们慢慢来。" / "好问题！")
@@ -438,7 +643,12 @@ function guidedTurn({ id, s, ladder, userText, forceWrap, correction = null }) {
   const modelHanzi = modelChoice?.hanzi || '';
   // Advance the arc unless this was a detour we're absorbing (3 detours in a row
   // advances anyway — never stuck on one beat).
-  const advance = !detour || stuck >= 3;
+  // A steer already moved the arc deliberately, so it must not also be treated as a
+  // detour to absorb. Redirect and "too easy" move forward from where they landed;
+  // "too hard" holds position so the easier beat actually gets a turn.
+  const advance = steered
+    ? (steered === 'redirect' || steered === 'tooeasy')
+    : (!detour || stuck >= 3);
   setLadder(id, {
     ...ladder,
     sessionWords,
@@ -448,6 +658,11 @@ function guidedTurn({ id, s, ladder, userText, forceWrap, correction = null }) {
     stuck: advance ? 0 : stuck,
     usedFrames: spentFrame ? [...usedFrames, spentFrame].slice(-8) : usedFrames,
     lastTeacherHanzi: lastHanzi,
+    // A short rolling transcript so a composed turn can refer to what was actually
+    // said rather than restarting the conversation every turn.
+    history: [...(ladder.history || []),
+      ...(userText ? [{ role: 'user', content: userText }] : []),
+      ...(lastHanzi ? [{ role: 'assistant', content: lastHanzi }] : [])].slice(-8),
   });
   // A word introduced mid-arc must join the plan's targetVocab, or post-hoc
   // scheduling (conversation.js) would never review the word we just taught.
@@ -465,7 +680,10 @@ function guidedTurn({ id, s, ladder, userText, forceWrap, correction = null }) {
     used, stage: 'guided', shouldWrap: !!wrap, wrapReason: wrap ? 'arc-complete' : null,
     closing: !wrap && beat === 'win',
     beat,
-    guided: true, choices: [],
+    guided: true, choices: [], steered,
+    // Shown to the learner as a soft aim — a conversation you can see the point of is
+    // one you can steer toward.
+    goal,
     // What they said, and the version of it that is right — rendered under their own
     // bubble, not as a verdict on the turn.
     correction: correction?.recast || null,
@@ -630,6 +848,10 @@ async function freeTurn({ id, s, userText, history, forceWrap, extWrap, correcti
       // Naming the exact error beats asking the model to "correct naturally" — told
       // only the latter, it invents a different mistake to fix, or fixes nothing.
       recastDirective(correction),
+      // The learner steering the lesson outranks the blueprint. Without this the
+      // executor keeps serving the plan's topic at someone who just said they want
+      // a different one.
+      steerDirective(userText),
     ].filter(Boolean).join('\n'),
   };
   let reply = await laoshiConverse(converseArgs);

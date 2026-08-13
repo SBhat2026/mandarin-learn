@@ -195,3 +195,54 @@ export function convertPinyin(input) {
     words: words.map(w => ({ hanzi: w.hanzi, pinyin: w.pinyin, gloss: w.gloss, alts: w.alts })),
   };
 }
+
+// ── Is this actually pinyin, or is it English? ──────────────────────────────
+// `pinyinness` measures how much of a SOLID string is covered by legal syllables,
+// which English passes far too easily: "I have a computer" scores well above the 0.7
+// threshold and converted to 差可啊凑铺个儿. Once the learner was expected to type
+// rather than tap, that turned every English aside into a garbage "correction" —
+// "I'm in my house" came back as "Mǐn2.zú hòu sè".
+//
+// The reliable test is per TOKEN, with no autocorrect: a real pinyin word segments
+// exactly into legal syllables. "mao", "ni hao", "wo xihuan kan shu" do. "my",
+// "hello", "computer" do not, and one failing token is enough.
+const ENGLISH_STOP = new Set(['a', 'i', 'is', 'it', 'in', 'im', 'my', 'me', 'the', 'to', 'do', 'you',
+  'have', 'has', 'want', 'this', 'that', 'what', 'why', 'how', 'and', 'or', 'but', 'not', 'no', 'yes',
+  'am', 'are', 'was', 'were', 'be', 'can', 'will', 'would', 'of', 'for', 'with', 'on', 'at', 'so',
+  'like', 'know', 'say', 'said', 'go', 'going', 'get', 'about', 'something', 'different', 'teacher']);
+
+function segmentsExactly(s, t = tables()) {
+  const n = s.length;
+  if (!n) return false;
+  const ok = Array(n + 1).fill(false);
+  ok[0] = true;
+  for (let i = 0; i < n; i++) {
+    if (!ok[i]) continue;
+    for (let len = Math.min(6, n - i); len >= 1; len--) {
+      if (t.syllables.has(s.slice(i, i + len))) ok[i + len] = true;
+    }
+  }
+  return ok[n];
+}
+
+export function isConfidentPinyin(input) {
+  const raw = String(input || '').trim().toLowerCase();
+  if (!raw) return false;
+  if (/[''’]/.test(raw)) return false;                       // English contractions
+  if (/[^a-zü0-9\sÀ-ɏ]/.test(raw)) return false;   // punctuation → prose
+  const tokens = raw.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return false;
+  const t = tables();
+  let english = 0;
+  for (const tok of tokens) {
+    const clean = tok.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zü]/g, '');
+    if (!clean) return false;
+    if (!segmentsExactly(clean, t)) return false;      // one impossible token is enough
+    if (ENGLISH_STOP.has(clean)) english++;
+  }
+  // Some tokens are genuinely both: `you` is English and also 有 (yǒu), `he` is 和,
+  // `me` is 么. So a stopword cannot veto on its own — it takes a MAJORITY for the
+  // line to be English. "wo you yi zhi mao" is 1/5 and stays pinyin; "do you like
+  // it" is 4/4 and does not.
+  return english / tokens.length < 0.5;
+}

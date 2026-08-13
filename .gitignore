@@ -13,3 +13,7 @@ test/fixtures/
 .DS_Store
 data/spend.json
 data/*.json
+
+# Bake-off / diagnostics output (regenerate with npm run bakeoff / diagnose)
+bakeoff.json
+diagnostics.json

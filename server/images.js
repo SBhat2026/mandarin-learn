@@ -46,7 +46,7 @@ const EMOJI = [
 // nineteenth-century dictionary.
 export const EVERYDAY_KEYWORDS = new Set(EMOJI.map(([kw]) => kw));
 
-function emojiFor(text) {
+function emojiMatch(text) {
   const s = ` ${String(text || '').toLowerCase().replace(/[^a-z\s]/g, ' ')} `;
   let best = null;
   for (const [kw, glyph] of EMOJI) {
@@ -54,7 +54,22 @@ function emojiFor(text) {
       if (!best || kw.length > best.kw.length) best = { kw, glyph };
     }
   }
-  return best?.glyph || null;
+  return best;
+}
+function emojiFor(text) { return emojiMatch(text)?.glyph || null; }
+
+// Is the picture actually a picture of THIS word, or of a modifier inside its gloss?
+// English compounds are head-final, so the head is the last noun: "city resident" is a
+// resident, not a city — but the keyword match happily returned 🏙️ for it, and that
+// counted as evidence the word was picturable enough to teach a beginner. Requiring
+// the match to land on the head is what tells 城市 ("city") apart from 市民.
+export function picturableHead(gloss) {
+  const m = emojiMatch(gloss);
+  if (!m) return false;
+  const words = String(gloss || '').toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
+  if (!words.length) return false;
+  const head = words[words.length - 1].replace(/s$/, '');
+  return head === m.kw || head === m.kw.replace(/s$/, '');
 }
 
 function isConcreteNoun(w) {

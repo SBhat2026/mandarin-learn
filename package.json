@@ -30,7 +30,8 @@
     "ingest:all": "node ingest/run-all.js",
     "dump:units": "node ingest/dump-units.js",
     "test": "node --test",
-    "diagnose": "node scripts/diagnose.js"
+    "diagnose": "node scripts/diagnose.js",
+    "bakeoff": "node scripts/bakeoff.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",

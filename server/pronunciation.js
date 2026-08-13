@@ -73,16 +73,32 @@ export function pinyinForHanzi(hanzi = '') {
 export function glossForHanzi(hanzi = '') {
   const h = normalizeHanzi(hanzi);
   if (!h) return '';
-  const whole = db().prepare('SELECT gloss FROM words WHERE hanzi=? AND gloss IS NOT NULL').get(h);
-  if (whole?.gloss) return whole.gloss;
+  // COALESCE, because plenty of imported rows carry `english` with `gloss` NULL. Without
+  // it those words fell through to the raw dictionary, which is ordered by entry and
+  // whose FIRST entry is often a cross-reference: 词 was taught as "old variant of
+  // 詞|词[ci2" while its own words row said "word; statement; speech".
+  const whole = db().prepare('SELECT COALESCE(gloss, english) g FROM words WHERE hanzi=? AND COALESCE(gloss, english) IS NOT NULL').get(h);
+  if (whole?.g) return whole.g;
   const out = [];
   for (const ch of h) {
-    const w = db().prepare('SELECT gloss FROM words WHERE hanzi=? AND gloss IS NOT NULL').get(ch);
-    if (w?.gloss) { out.push(w.gloss.split(/[;,]/)[0].trim()); continue; }
-    const d = db().prepare('SELECT definitions FROM dictionary WHERE simplified=? LIMIT 1').get(ch);
-    if (d?.definitions) { try { const defs = JSON.parse(d.definitions); if (defs[0]) out.push(String(defs[0]).trim()); } catch {} }
+    const w = db().prepare('SELECT COALESCE(gloss, english) g FROM words WHERE hanzi=? AND COALESCE(gloss, english) IS NOT NULL').get(ch);
+    if (w?.g) { out.push(w.g.split(/[;,]/)[0].trim()); continue; }
+    out.push(bestDictionaryGloss(ch));
   }
   return out.filter(Boolean).join(' · ');
+}
+
+// A character can have several dictionary entries, and the first is frequently
+// bookkeeping rather than a meaning. Take the first entry that actually says what the
+// character MEANS.
+const NON_MEANING_DEF = /^(old variant|variant of|surname\b|abbr\.? for|used in|see )/i;
+function bestDictionaryGloss(ch) {
+  const rows = db().prepare('SELECT definitions FROM dictionary WHERE simplified=? LIMIT 6').all(ch);
+  const defs = [];
+  for (const r of rows) {
+    try { for (const d of JSON.parse(r.definitions)) defs.push(String(d).trim()); } catch {}
+  }
+  return defs.find(d => d && !NON_MEANING_DEF.test(d)) || defs[0] || '';
 }
 
 // ---------------------------------------------------------------------------

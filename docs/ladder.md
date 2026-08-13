@@ -214,3 +214,72 @@ discouragement.
 
 `test/correction.test.js`; probes `no-choices`, `model-answer`, `correction`,
 `strictness` in the level sweep.
+
+---
+
+## 2026-08-13 (later) — the guided rungs actually converse
+
+Real transcripts showed the guided rungs emitting sound bites: "这是屋。" "我有电脑。"
+"这是市。" — statements about objects, five in a row, never referring to anything the
+learner had said and never asking anything. The learner typed "I want to do something
+different" twice and was drilled on 高中 both times.
+
+**Root cause: at rungs 0/1 no model was called at all.** Turns came from templates,
+which guarantee decodability and cannot hold a conversation.
+
+### The bake-off (`npm run bakeoff`)
+
+Measured, not guessed — three engines on five real scenarios, scored on decodability,
+whether the turn invites a reply, whether it reuses what the learner said, and latency:
+
+| engine | decodable | invites | responsive | p50 |
+| --- | --- | --- | --- | --- |
+| template | 5/5 | 5/5* | 3/5 | 1ms |
+| qwen3-235b-a22b-2507 | 3/5 | 5/5 | 3/5 | 1.7s |
+| claude-sonnet-5 | 3/5 | 4/5 | 1/5 | 4.0s |
+
+\* misleading — the templates asked "你有X吗？" **five times in a row**. The metric
+counted the question mark; a human counts one sentence.
+
+Qwen matched Claude at 2.3× the speed and a fraction of the cost, so **Qwen composes**.
+
+### How it works now
+
+The conversational beats (`identify`/`relate`/`use`) ask the model for a turn built
+from the session goal, the words in play, a rolling transcript, and what the learner
+just said. `meet`/`grow`/`win`/`farewell` stay deterministic — they carry guarantees
+(introduce a word, land the payoff, actually end) a model must not be able to skip.
+
+Everything the templates guaranteed still holds: the turn is validated against the
+allowed set, gets ONE repair pass naming what leaked, and falls back to a frame if it
+drifts again or no backend is reachable. Two extra rules earned by the transcripts:
+
+- **A composed turn that asks nothing is rejected**, even if it is perfectly
+  decodable. That is the failure we replaced templates to escape.
+- **The fallback frame must ask too** — half the frames are statements ("我有钱。"),
+  and falling back to one turned a conversational beat back into a broadcast.
+
+`CORE_RUNG1` gained the HSK-1 glue a conversation cannot happen without: 什么 还 家 里
+为什么 名字 叫 怎么样 一起 给 做. Without them the model had to either leak them or
+fall back to "你有X吗？" forever.
+
+### A visible aim
+
+`sessionGoal()` puts one plain line at the top of the thread — "today · talk about car
+and water". A soft aim, not a task. The old sessions had a hidden arc and read as
+unrelated facts.
+
+### Steering (`intent.js`)
+
+`redirect` / `tooeasy` / `toohard` are now first-class intents. A redirect **reseeds
+the session onto different words mid-conversation** and restarts the arc, and the
+rejected words are recorded so they never come back — not later, and not as tomorrow's
+callback. That is what finally kills 高中.
+
+### The free rung
+
+`executorSystem`'s human-likeness rule used to say "do NOT ask a question every single
+time; sometimes just react". Taken literally the model reacted and CLOSED nearly every
+turn ("你很好，别担心。"), measured at 2/13 turns inviting a reply. Replaced with an
+explicit ball-in-their-court rule plus "trade information". **Still the weakest point
+at ~38-50%** — see diagnostics.md.

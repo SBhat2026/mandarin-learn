@@ -12,7 +12,7 @@
 // "recast it naturally" into a directive naming the exact error.
 import { segment, nounCategory, shortGloss } from './vocabguard.js';
 import { pinyinForHanzi, glossForHanzi } from './pronunciation.js';
-import { convertPinyin } from './pinyinime.js';
+import { convertPinyin, isConfidentPinyin } from './pinyinime.js';
 
 const CJK = /[一-鿿]/;
 const hasCjk = (s) => CJK.test(String(s || ''));
@@ -42,8 +42,11 @@ export function scriptOf(text = '') {
   const s = String(text).trim();
   if (!s) return 'empty';
   if (hasCjk(s)) return /[a-zA-Z]/.test(s.replace(/[a-zA-Z]*[0-9]/g, '')) ? 'mixed' : 'hanzi';
-  const conv = convertPinyin(s);
-  if (conv.isPinyin || conv.ok) return 'pinyin';
+  // NOT convertPinyin's own `isPinyin`: that only asks how much of the string is
+  // covered by legal syllables, which English clears easily — "I have a computer"
+  // converted to 差可啊凑铺个儿 and got "corrected" at the learner. Every token has to
+  // BE pinyin for this to be pinyin.
+  if (isConfidentPinyin(s)) return 'pinyin';
   return /[a-zA-Z]/.test(s) ? 'english' : 'other';
 }
 
