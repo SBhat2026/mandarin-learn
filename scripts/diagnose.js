@@ -43,24 +43,64 @@ const LEVELS = [
 ];
 
 // What the learner says back, per level. Deliberately imperfect — a real learner
-// mixes languages, stalls, and gets things wrong.
-// What the learner says back, per level. Each line is tagged so the probes know what
-// they are looking at:
+// mixes languages, stalls, and gets things wrong. Each line is tagged so the probes
+// know what they are looking at:
 //   error:<kind> — a DELIBERATE mistake that must come back corrected
 //   toneless     — pinyin without tone marks; fine early, a correction later
 //   good         — unambiguously correct; must never be "corrected"
+//
+// The lines are TEMPLATES, not fixed strings, because a fixed script is topic-blind:
+// it said 猫 while the session was teaching 车 and 钱, so the teacher had nothing of
+// the learner's to pick up and `picks-up-learner` read 14% at the guided rungs. That
+// was the harness failing, not the teacher. A real learner answers with the words
+// they were just given, so the slots are filled from what this session introduced:
+//   {N} a noun the teacher taught       {n} that noun in toneless pinyin
+//   {M} a noun whose measure word is NOT 个    {m} that measure word
+// {M}/{m} travel together so the planted measure-word error (一个{M}) and its correct
+// twin (一{m}{M}) are both generated from the same noun — the error still fires no
+// matter which noun the session happens to teach.
 const SCRIPTS = {
-  none:            [['猫', 'toneless'], ['这是猫', 'good'], ['好', ''], ['mao', 'toneless']],
-  'single-words':  [['猫', 'good'], ['mao', 'toneless'], ['我有猫', ''], ['水', 'good']],
-  'short-sentences': [['我有一只猫。', 'good'], ['我是好', 'error:shi-adjective'], ['mao', 'toneless'],
-                      ['我有一个猫', 'error:measure-word'], ['我想喝水。', 'good']],
+  none:            [['{n}', 'toneless'], ['这是{N}', 'good'], ['好', ''], ['我有{N}', '']],
+  'single-words':  [['{N}', 'good'], ['{n}', 'toneless'], ['我有{N}', ''], ['这是{N}', 'good']],
+  'short-sentences': [['我有一{m}{M}。', 'good'], ['我是好', 'error:shi-adjective'], ['{n}', 'toneless'],
+                      ['我有一个{M}', 'error:measure-word'], ['我想喝水。', 'good']],
   sentences:       [['我今天很累，因为我工作了很久。', 'good'], ['二个人在这儿', 'error:er-liang'],
-                    ['wo xihuan kan shu', 'toneless'], ['我有一个书', 'error:measure-word'],
+                    ['wo xihuan {n}', 'toneless'], ['我有一个{M}', 'error:measure-word'],
                     ['我以前住在北京。', 'good']],
   fluent:          [['我最近在想换工作的事，可是还没决定。', 'good'], ['我是很累', ''],
-                    ['wo juede zhongwen hen nan', 'toneless'], ['我有一个猫', 'error:measure-word'],
+                    ['wo juede {n} hen you yisi', 'toneless'], ['我有一个{M}', 'error:measure-word'],
                     ['我认为这个问题没有简单的答案。', 'good']],
 };
+
+// When the session has not put a usable noun in front of the learner yet, the slots
+// fall back to these. Falling back is COUNTED and reported: a session that never
+// teaches a concrete noun is itself worth knowing about, and silently substituting
+// 猫 would hide it.
+const FALLBACK_NOUNS = [{ hanzi: '猫', pinyin: 'māo' }, { hanzi: '水', pinyin: 'shuǐ' }];
+
+const toneless = (p = '') => String(p).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ü/g, 'v').trim();
+
+// Fill one script line from the nouns this session has actually taught. `taught` is
+// most-recent-first, so the learner reaches for the word they just met — which is what
+// a learner does. `turn` rotates the pick so five turns don't all echo one noun.
+function fillLine(template, taught, turn, measureByNoun) {
+  let usedFallback = false;
+  const pool = taught.length ? taught : (usedFallback = true, FALLBACK_NOUNS);
+  const noun = pool[turn % pool.length];
+
+  // The measure-word slots need a noun the checker actually has an opinion about;
+  // 一个人 is correct Chinese and would plant an "error" that is not one.
+  const measurable = taught.filter(n => measureByNoun[n.hanzi] && measureByNoun[n.hanzi] !== '个');
+  let mNoun = measurable[turn % (measurable.length || 1)];
+  if (!mNoun) { mNoun = FALLBACK_NOUNS[0]; if (/\{[Mm]\}/.test(template)) usedFallback = true; }
+
+  const text = template
+    .replace(/\{N\}/g, noun.hanzi)
+    .replace(/\{n\}/g, toneless(noun.pinyin) || 'mao')
+    .replace(/\{M\}/g, mNoun.hanzi)
+    .replace(/\{m\}/g, measureByNoun[mNoun.hanzi] || '只');
+  return { text, usedFallback: usedFallback && /\{[NnMm]\}/.test(template) };
+}
 const CONFUSION = "I don't understand";
 const CONFUSION_AT = 3;               // inject on this turn so never-strand is exercised
 
@@ -166,10 +206,18 @@ async function runLevel({ level, maxTurns, probes }) {
 
   const start = await converse.startConversation();
   const script = SCRIPTS[level.produces];
+  const { MEASURE_BY_NOUN } = await import('../server/correction.js');
   const turns = [];
   const history = [];
   let userText = '';                       // the opening turn takes no input
   let tag = '';                            // what this line is (planted error / toneless / good)
+  // Nouns the teacher has put in front of the learner, most recent first — the pool
+  // the learner's replies are built from.
+  const taught = [];
+  let fallbacks = 0;
+  const isNoun = (w) => {
+    try { return Boolean(vocabguard.nounCategory({ hanzi: w.hanzi, gloss: w.gloss || '' })); } catch { return false; }
+  };
 
   for (let i = 0; i < maxTurns; i++) {
     const wasConfusion = userText === CONFUSION;
@@ -209,9 +257,26 @@ async function runLevel({ level, maxTurns, probes }) {
     });
     if (reply.hanzi) history.push({ role: 'assistant', content: reply.hanzi });
 
+    // Absorb the words this turn taught, newest first, so the next learner line can
+    // use them. Both the meet-the-words strip and any word marked new in the sentence
+    // count — either way the learner has just been shown it.
+    const offered = [
+      ...(reply.newWords || []),
+      ...[...(reply.tokens || []), ...(reply.followFrame?.tokens || [])].filter(t => t.isNew),
+    ];
+    for (const w of offered) {
+      if (!w?.hanzi || taught.some(t => t.hanzi === w.hanzi) || !isNoun(w)) continue;
+      taught.unshift({ hanzi: w.hanzi, pinyin: w.pinyin || '', gloss: w.gloss || '' });
+    }
+
     if (reply.shouldWrap) break;
     if (i + 1 === CONFUSION_AT) { userText = CONFUSION; tag = ''; }
-    else { const line = script[i % script.length] || script[0]; [userText, tag] = line; }
+    else {
+      const [template, t] = script[i % script.length] || script[0];
+      const filled = fillLine(template, taught, i, MEASURE_BY_NOUN);
+      if (filled.usedFallback) fallbacks++;
+      userText = filled.text; tag = t;
+    }
     history.push({ role: 'user', content: userText });
   }
 
@@ -224,6 +289,7 @@ async function runLevel({ level, maxTurns, probes }) {
   const run = ([id, fn]) => { const r = fn(ctx); return { id, ...r }; };
   return {
     level: { ...level }, rung, firstRung, settleSessions,
+    taught: taught.map(t => t.hanzi), fallbacks,
     turnCount: turns.length,
     transcript: turns.map(t => ({ i: t.i, said: t.userText, teacher: t.reply.hanzi, beat: t.reply.beat, ms: t.ms, error: t.error })),
     reading: { profile: reading.profile, passages: reading.passages.length },
@@ -253,6 +319,11 @@ const MARK = { pass: '✅', fail: '❌', warn: '⚠️ ', skip: '·' };
 
 function report(r) {
   console.log(`  rung ${r.rung} (first session would be ${r.firstRung}, settled after ${r.settleSessions}) · ${r.turnCount} turns · ${r.reading.passages} passages`);
+  // What the learner had to work with. A high fallback count means the session never
+  // handed them a usable noun, so their replies came out of thin air — the probes that
+  // read the exchange are measuring less than they look like they are.
+  console.log(`  taught: ${r.taught.length ? r.taught.join(' ') : '(nothing)'}`
+    + (r.fallbacks ? `   ⚠️  ${r.fallbacks} learner line(s) fell back to a stock noun` : ''));
   console.log('  transcript:');
   for (const t of r.transcript) {
     if (t.said) console.log(`    ${String(t.i).padStart(2)} learner  ${t.said}`);

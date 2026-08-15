@@ -6,13 +6,44 @@ import { mediaUrl, isDemo, authHeaders } from './api.js';
 import { recordUtterance, classifyTones, pitchSupported } from './pitch.js';
 
 let _audio;
-function playUrl(url, { slow = false, onFail } = {}) {
+function playUrl(url, { slow = false, onFail, onEnd } = {}) {
   try {
     if (_audio) { _audio.pause(); }
     _audio = new Audio(url);
     _audio.playbackRate = slow ? 0.75 : 1;
+    _audio.onended = () => onEnd?.();
+    _audio.onerror = () => onFail?.();
     _audio.play().catch(() => onFail?.());
   } catch { onFail?.(); }
+}
+
+// Cut the teacher off mid-sentence. Barge-in: in a hands-free conversation the
+// learner must be able to start talking before the teacher has finished, the way they
+// can with a person. Without this, voice mode is a series of lectures you wait out.
+export function stopSpeaking() {
+  try { if (_audio) { _audio.onended = null; _audio.pause(); _audio = null; } } catch {}
+  try { window.speechSynthesis?.cancel(); } catch {}
+}
+
+// speak(), but you can await the end of it. This is what lets the microphone arm at
+// exactly the moment the teacher stops — a fixed timer either clips the last word or
+// leaves an awkward gap, and both make the learner talk over the teacher.
+// Always resolves (never rejects): a failure to speak must not stall the turn loop.
+export function speakAwait(text) {
+  if (!text) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; resolve(); } };
+    // Belt and braces: if the audio element never fires `ended` (a stalled stream, a
+    // tab throttled in the background), the conversation must still move on.
+    const guard = setTimeout(done, 15000);
+    const finish = () => { clearTimeout(guard); done(); };
+    const browser = () => speakBrowser(text, { rate: 0.85, onEnd: finish });
+    if (isDemo) return browser();
+    neuralUrl(text, false)
+      .then(u => playUrl(u, { onEnd: finish, onFail: browser }))
+      .catch(browser);
+  });
 }
 
 // Neural TTS via the backend; memoized per text+speed. Rejects → caller falls back.
@@ -77,14 +108,16 @@ export function ttsSupported() {
 export function speak(text) { speakNeural(text, false); }
 
 // Browser speechSynthesis (fallback path). Slightly slow (0.85) for clarity.
-export function speakBrowser(text, { rate = 0.85, pitch = 1 } = {}) {
-  if (!ttsSupported() || !text) return;
+export function speakBrowser(text, { rate = 0.85, pitch = 1, onEnd } = {}) {
+  if (!ttsSupported() || !text) { onEnd?.(); return; }
   const u = new SpeechSynthesisUtterance(text);
   u.lang = 'zh-CN';
   u.rate = rate;
   u.pitch = pitch;
   const v = pickVoice();
   if (v) u.voice = v;
+  u.onend = () => onEnd?.();
+  u.onerror = () => onEnd?.();
   window.speechSynthesis.cancel();
   window.speechSynthesis.speak(u);
 }
@@ -170,14 +203,21 @@ async function recordBlob({ maxMs = 6000, stopSignal } = {}) {
   return new Blob(chunks, { type: mime || 'audio/webm' });
 }
 
-async function whisperTranscribe(blob, hint = '') {
-  const r = await fetch('/api/stt' + (hint ? `?hint=${encodeURIComponent(hint)}` : ''), {
+async function whisperTranscribe(blob, hint = '', sessionId = null) {
+  const q = new URLSearchParams();
+  if (hint) q.set('hint', hint);
+  // Lets the server prime the recognizer with every word this session has taught —
+  // the accuracy advantage a general-purpose voice assistant cannot have, because it
+  // does not know what you are trying to learn.
+  if (sessionId) q.set('session', sessionId);
+  const r = await fetch('/api/stt' + (q.toString() ? `?${q}` : ''), {
     method: 'POST',
     headers: { 'content-type': blob.type || 'application/octet-stream', ...authHeaders() },
     body: blob,
   });
   if (!r.ok) throw new Error('stt ' + r.status);
-  return (await r.json()).transcript || '';
+  const d = await r.json();
+  return { transcript: d.transcript || '', confidence: d.confidence ?? null, rejected: d.rejected || null };
 }
 
 // True if we can capture *any* spoken signal (transcript OR acoustic pitch).
@@ -191,22 +231,26 @@ export function spokenCaptureSupported() {
 // Everything stays on-device. Returns a payload the server folds into the hidden
 // pronunciation model — never a visible score.
 //   { transcript, alternatives, heardTones, timing, onLevel-driven UI hook }
-export async function captureSpoken({ expectedSyllables = 1, timeoutMs = 6000, onLevel, hint = '' } = {}) {
+export async function captureSpoken({
+  expectedSyllables = 1, timeoutMs = 6000, onLevel, hint = '', sessionId = null,
+  silenceMs = 700, noSpeechMs = 0,
+} = {}) {
   const useWhisper = await whisperAvailable();
 
   // Acoustic pitch (best-effort). Its silence detection also ENDS the whisper
   // recording, so we stop listening when the learner stops talking.
   const pitchP = pitchSupported()
-    ? recordUtterance({ maxMs: Math.min(timeoutMs, 5000), onLevel }).catch(() => null)
+    ? recordUtterance({ maxMs: Math.min(timeoutMs, 12000), onLevel, silenceMs, noSpeechMs }).catch(() => null)
     : Promise.resolve(null);
 
   let stt;
   if (useWhisper) {
     try {
       const blob = await recordBlob({ maxMs: timeoutMs, stopSignal: pitchSupported() ? pitchP : undefined });
-      const transcript = (await whisperTranscribe(blob, hint)).replace(/[。，、!！?？\s]+$/, '');
-      stt = { transcript, alternatives: transcript ? [transcript] : [] };
-    } catch { stt = { transcript: '', alternatives: [] }; }
+      const r = await whisperTranscribe(blob, hint, sessionId);
+      const transcript = r.transcript.replace(/[。，、!！?？\s]+$/, '');
+      stt = { transcript, alternatives: transcript ? [transcript] : [], confidence: r.confidence, rejected: r.rejected };
+    } catch { stt = { transcript: '', alternatives: [], confidence: null, rejected: 'error' }; }
   } else {
     stt = recognitionSupported()
       ? await listenOnce({ timeoutMs }).catch(() => ({ transcript: '', alternatives: [] }))
@@ -219,6 +263,10 @@ export async function captureSpoken({ expectedSyllables = 1, timeoutMs = 6000, o
   return {
     transcript: stt.transcript || '',
     alternatives: stt.alternatives || [],
+    // null means "the recognizer told us nothing", which is NOT the same as low
+    // confidence — callers must not treat an unknown as a bad transcript.
+    confidence: stt.confidence ?? null,
+    rejected: stt.rejected || null,
     heardTones,
     timing: pitch ? { latencyMs: pitch.latencyMs, speechMs: pitch.speechMs, totalMs: pitch.totalMs } : {},
     heardVoice: !!(pitch?.contour?.length),

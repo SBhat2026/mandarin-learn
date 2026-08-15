@@ -619,7 +619,7 @@ export function vocabToken(wordId) {
 // against the allowed set, gets exactly ONE repair pass naming what leaked, and falls
 // back to the template if it still drifts or if no backend is reachable. The offline
 // guarantee is unchanged — a turn always exists.
-export function beginnerPrompt({ goal, allowed, sessionWords, userText, history = [], push = 'gentle', move = '' }) {
+export function beginnerPrompt({ goal, allowed, sessionWords, userText, history = [], push = 'gentle', move = '', follow = null }) {
   const vocab = [...allowed].join(' ');
   const focus = sessionWords.map(w => `${w.hanzi} (${w.gloss || ''})`).join(', ');
   const recent = history.slice(-4).map(m => `${m.role === 'user' ? 'learner' : '老师'}: ${m.content}`).join('\n');
@@ -633,7 +633,11 @@ export function beginnerPrompt({ goal, allowed, sessionWords, userText, history 
 
 THE AIM OF THIS CONVERSATION: ${goal}. Move toward it, but follow the learner.
 TODAY'S WORDS: ${focus}
-
+${follow ? `
+THE LEARNER CHOSE ${follow.hanzi} (${follow.gloss || ''}). Stay on it. Your turn MUST contain
+${follow.hanzi}. Do not switch to a different word from today's list — they picked this one,
+and moving off it tells them their answer did not matter.
+` : ''}
 ${recent ? `The conversation so far:\n${recent}\n` : ''}${userText ? `The learner just said: "${userText}"` : 'Open the conversation.'}
 
 HARD VOCABULARY LIMIT — use ONLY these words, nothing else. This is absolute:

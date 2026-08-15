@@ -47,7 +47,12 @@ export function pitchSupported() {
 
 // Record until the learner stops speaking (or maxMs). Resolves a summary of the
 // utterance: the voiced f0 contour, speech onset latency and duration.
-export async function recordUtterance({ maxMs = 4000, silenceMs = 700, onLevel } = {}) {
+// `noSpeechMs` ends the recording early when the learner never started talking at all.
+// The hands-free loop re-arms the microphone after every teacher turn, so most
+// recordings that capture nothing are simply the learner thinking — holding the mic
+// open for the full timeout makes the app feel stuck and hands Whisper a long stretch
+// of silence, which is precisely what it hallucinates on.
+export async function recordUtterance({ maxMs = 4000, silenceMs = 700, noSpeechMs = 0, onLevel } = {}) {
   if (!pitchSupported()) return null;
   let stream, ac;
   try {
@@ -76,7 +81,8 @@ export async function recordUtterance({ maxMs = 4000, silenceMs = 700, onLevel }
         onLevel?.(rms);
         if (voiced) { if (speechStart == null) speechStart = el; lastVoice = el; }
         const ended = speechStart != null && lastVoice != null && (el - lastVoice) > silenceMs;
-        if (el >= maxMs || ended) { cleanup(); resolve(summarize(frames, speechStart, lastVoice, el)); return; }
+        const neverSpoke = noSpeechMs > 0 && speechStart == null && el >= noSpeechMs;
+        if (el >= maxMs || ended || neverSpoke) { cleanup(); resolve(summarize(frames, speechStart, lastVoice, el)); return; }
         requestAnimationFrame(tick);
       };
       requestAnimationFrame(tick);

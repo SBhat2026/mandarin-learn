@@ -16,7 +16,7 @@ import { runBackground } from './reasoner.js';
 import { laoshiReply, laoshiLesson, available as laoshiAvailable } from './qwen.js';
 import { buildLessonPlan } from './neighborhood.js';
 import { scheduleFromConversation, detectUsed, observePronunciation } from './conversation.js';
-import { startConversation, conversationTurn, sessionPlan, markEnded } from './converse.js';
+import { startConversation, conversationTurn, sessionPlan, markEnded, sessionVocabHint } from './converse.js';
 import { scriptDirective, personaDirective, scriptLevel } from './learner.js';
 import { fullStats } from './stats.js';
 import { evaluateThrottle } from './scheduler.js';
@@ -33,7 +33,7 @@ import { nextFamily, recordFamilyOutcome } from './familylessons.js';
 import { getStory, storyOutcome } from './stories.js';
 import { convertPinyin } from './pinyinime.js';
 import { synthesize } from './tts.js';
-import { transcribe, sttAvailable, sttEngine } from './stt.js';
+import { transcribe, sttAvailable, sttEngine, warmSTT } from './stt.js';
 import { spendSummary } from './spend.js';
 import { requireAccess, accessRequired, checkAccess } from './auth.js';
 
@@ -348,7 +348,11 @@ app.get('/api/spend', wrap(async (req, res) => res.json(await spendSummary())));
 // ── Local Whisper STT ───────────────────────────────────────────────────────
 app.get('/api/stt/health', (req, res) => res.json({ available: sttAvailable(), engine: sttEngine() }));
 app.post('/api/stt', express.raw({ type: () => true, limit: '15mb' }), wrap(async (req, res) => {
-  const hint = String(req.query.hint || '');
+  // The client knows what the teacher just said; the server knows every word the
+  // session has taught. Both bias recognition, so both go in the prompt.
+  const parts = [String(req.query.hint || '')];
+  if (req.query.session) { try { parts.unshift(sessionVocabHint(String(req.query.session))); } catch {} }
+  const hint = parts.filter(Boolean).join(' ').slice(0, 220);
   res.json(await transcribe(req.body, { hint, mime: req.get('content-type') || '' }));
 }));
 
@@ -430,4 +434,8 @@ if (SERVE_APP) {
 }
 
 const PORT = process.env.PORT || 5178;
-app.listen(PORT, () => console.log(`API on http://localhost:${PORT}${SERVE_APP ? ' (serving app + api)' : ''}`));
+app.listen(PORT, () => {
+  console.log(`API on http://localhost:${PORT}${SERVE_APP ? ' (serving app + api)' : ''}`);
+  // Load the speech model now, so the first thing the learner says is not the slow one.
+  warmSTT();
+});

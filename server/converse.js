@@ -304,6 +304,24 @@ export async function startConversation() {
     rung, guided: rung < 2, hasThread: hasOpenThread(), blueprintEngine: blueprint._engine };
 }
 
+// The words this conversation is actually made of, as a recognition bias for the
+// microphone. Whisper's language model resolves a learner's flat, hesitant syllable
+// far more often when the words in play are in its initial prompt — and in this app we
+// know exactly what those are, which a general-purpose recognizer never does. This is
+// the concrete reason speaking here beats speaking to a generic chatbot.
+export function sessionVocabHint(id) {
+  const ladder = getLadder(id);
+  const words = [
+    ...(ladder?.sessionWords || []).map(w => w.hanzi),
+    ...(ladder?.introducedHanzi || []),
+    ladder?.lastTeacherHanzi || '',
+  ].filter(Boolean);
+  if (!words.length) return '';
+  // Phrased as a sentence of context rather than a word list: Whisper's prompt is
+  // conditioning text, not a lexicon, so prose primes it better than tokens.
+  return `这是一节中文课。我们在说：${[...new Set(words)].join('、')}。`;
+}
+
 export function getSession(id) {
   const row = db().prepare('SELECT * FROM conversation_sessions WHERE id=?').get(id);
   if (!row) return null;
@@ -358,10 +376,23 @@ const COMPOSED_BEATS = new Set(['identify', 'relate', 'use']);
 // What "invites a reply" means, in code — the same test the diagnostics probe uses.
 const ASKS = /[？?]|吗|呢|什么|几|谁|哪|怎么样|为什么/;
 
-async function composeGuidedTurn({ goal, sessionWords, userText, rung, history, push, move }) {
+// Which of today's words did the learner just reach for? That word is what the next
+// turn should be about. Returns null when they named none of them (or when we have
+// already followed the same word for two turns running — following the learner must
+// not become grinding one noun, which is the failure `fixation` watches for).
+function learnerFocus(userText, sessionWords, ladder = {}) {
+  const said = String(userText || '');
+  if (!said || !sessionWords?.length) return null;
+  const hit = sessionWords.find(w => w.hanzi && said.includes(w.hanzi));
+  if (!hit) return null;
+  const streak = ladder.followedHanzi === hit.hanzi ? (ladder.followedStreak || 0) : 0;
+  return streak >= 2 ? null : hit;
+}
+
+async function composeGuidedTurn({ goal, sessionWords, userText, rung, history, push, move, follow = null }) {
   if (!(await qwenAvailable())) return null;
   const allowed = allowedSet({ rung, sessionWords });
-  const base = beginnerPrompt({ goal, allowed, sessionWords, userText, history, push, move: talkMoveDirective(move) });
+  const base = beginnerPrompt({ goal, allowed, sessionWords, userText, history, push, follow, move: talkMoveDirective(move) });
   let leaks = '';
   for (let attempt = 0; attempt < 2; attempt++) {
     let reply;
@@ -377,6 +408,15 @@ async function composeGuidedTurn({ goal, sessionWords, userText, rung, history, 
       if (attempt === 1) return null;
       leaks = '(that stated a fact and asked nothing — it MUST end by asking them something)';
       console.log('[guided] composed turn asked nothing — repairing');
+      continue;
+    }
+    // Telling the model to stay on the learner's word is not enough on its own — a
+    // small model drifts back to whatever is first on the vocabulary list. Checked,
+    // not trusted.
+    if (follow && !reply.hanzi.includes(follow.hanzi)) {
+      if (attempt === 1) return null;
+      leaks = `(that dropped ${follow.hanzi}, the word the learner just used — it MUST appear in your turn)`;
+      console.log(`[guided] composed turn abandoned the learner's word ${follow.hanzi} — repairing`);
       continue;
     }
     const { ok, violations } = validateTurn(reply.hanzi, allowed);
@@ -518,7 +558,7 @@ async function guidedTurn({ id, s, ladder, userText, forceWrap, correction = nul
   // one rather than advertising the topic the learner just turned down.
   const goal = sessionGoal(sessionWords, plan);
 
-  let reply, newWord = null;
+  let reply, newWord = null, followed = null;
   const frameArgs = { rung: ladder.rung, sessionWords, exclude: usedFrames };
 
   if (beat === 'farewell') {
@@ -591,12 +631,19 @@ async function guidedTurn({ id, s, ladder, userText, forceWrap, correction = nul
   } else {
     // identify / use / relate: the CONVERSATIONAL beats. The model composes a turn
     // that reacts to what the learner just said and asks something back; the frame is
-    // the fallback, not the default. Rotate focus so each word still recurs.
-    const focus = sessionWords.length ? sessionWords[(beatIdx + 1) % sessionWords.length] : null;
+    // the fallback, not the default.
+    //
+    // Focus used to rotate purely on the beat index, which is why a learner who said
+    // 车 got asked "这是钱吗？" — the teacher moved to the next word on its list
+    // regardless of the one they had just chosen. Rotation is the FALLBACK now: if the
+    // learner named one of today's words, that word is the topic, because picking it up
+    // is the whole difference between a conversation and a checklist being read aloud.
+    followed = learnerFocus(userText, sessionWords, ladder);
+    const focus = followed || (sessionWords.length ? sessionWords[(beatIdx + 1) % sessionWords.length] : null);
     let frame = buildFrameTurn({ ...frameArgs, turnIndex: ladder.turnIndex + 1, focusHanzi: focus?.hanzi });
     const composed = COMPOSED_BEATS.has(beat)
       ? await composeGuidedTurn({ goal: goal.en, sessionWords, userText, rung: ladder.rung,
-          history: ladder.history || [], push: strictness(prof.t, ladder.rung).band,
+          history: ladder.history || [], push: strictness(prof.t, ladder.rung).band, follow: followed,
           move: pickMove({ history: ladder.history || [], userText, usedMoves: ladder.usedMoves || [], turnIndex: beatIdx }) })
       : null;
     // The fallback has to clear the same bar as the thing it replaces. Half the frames
@@ -610,7 +657,14 @@ async function guidedTurn({ id, s, ladder, userText, forceWrap, correction = nul
     }
     // Keep the frame's choices/frameId bookkeeping even when the model wrote the
     // words, so within-session frame rotation and the model answer still work.
-    reply = composed ? { ...frame, ...composed, composed: true } : frame;
+    //
+    // `tokens` must NOT be inherited: they describe the frame's sentence, and at the
+    // guided rungs the interlinear IS the sentence the learner reads. Keeping them
+    // rendered one sentence word-by-word while `hanzi` (and the audio) said a
+    // different one — most visibly when the composed turn reached for a word the
+    // frame never used (你有多少钱？ shown with no gloss for 多少). Dropping them here
+    // makes the grounding pass below re-derive them from the sentence actually sent.
+    reply = composed ? { ...frame, ...composed, tokens: null, composed: true } : frame;
   }
 
   // A detour reply is TWO sentences: the human one ("没关系，我们慢慢来。" / "好问题！")
@@ -667,6 +721,10 @@ async function guidedTurn({ id, s, ladder, userText, forceWrap, correction = nul
     stuck: advance ? 0 : stuck,
     usedFrames: spentFrame ? [...usedFrames, spentFrame].slice(-8) : usedFrames,
     lastTeacherHanzi: lastHanzi,
+    // How long we have been following the learner onto the same word, so that
+    // responsiveness has a ceiling and cannot turn into fixation.
+    followedHanzi: followed?.hanzi || null,
+    followedStreak: followed ? (ladder.followedHanzi === followed.hanzi ? (ladder.followedStreak || 0) + 1 : 1) : 0,
     // A short rolling transcript so a composed turn can refer to what was actually
     // said rather than restarting the conversation every turn.
     history: [...(ladder.history || []),

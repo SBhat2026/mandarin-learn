@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
-import { playAudio, speak, normalizeHanzi, captureSpoken, spokenCaptureSupported } from '../lib/speech.js';
+import { playAudio, speak, speakAwait, stopSpeaking, normalizeHanzi, captureSpoken, spokenCaptureSupported } from '../lib/speech.js';
 import { TonedPinyin, ScriptBubble, scriptModeFromLevel } from '../components/Toned.jsx';
 
 // One continuous conversation with Laoshi, laid out as a LADDER. At the guided rungs
@@ -22,6 +22,12 @@ export default function Converse({ onFallback }) {
   const [popover, setPopover] = useState(null);
   const [revealed, setRevealed] = useState({});
   const [ime, setIme] = useState(null);          // live pinyin→hanzi conversion preview
+  // Voice mode: the teacher speaks, the mic arms itself, and the learner never touches
+  // the keyboard. The text stays on screen throughout — the interlinear IS the lesson,
+  // and a voice-only Mandarin app would be a podcast. Remembered between sessions.
+  const [voice, setVoice] = useState(() => localStorage.getItem('converse_voice') === '1');
+  const [phase, setPhase] = useState('idle');    // idle | speaking | listening | thinking
+  const [heard, setHeard] = useState(null);      // a transcript we are not confident enough to send
   const imeTimer = useRef(null);
   const inputRef = useRef(null);
   const scroller = useRef(null);
@@ -30,6 +36,10 @@ export default function Converse({ onFallback }) {
   const finished = useRef(false);
   const itemsRef = useRef(items);
   const sessionRef = useRef(null);
+  const voiceRef = useRef(voice);
+  // Bumped on every user action that should abandon an in-flight voice loop, so a
+  // late-resolving microphone cannot send a turn the learner has moved past.
+  const loopSeq = useRef(0);
   const sessionId = session?.sessionId;
   const scriptMode = scriptModeFromLevel(session?.scriptLevel, session?.scriptPref);
   const canSpeak = spokenCaptureSupported();
@@ -44,6 +54,9 @@ export default function Converse({ onFallback }) {
   useEffect(() => { scroller.current?.scrollTo(0, scroller.current.scrollHeight); }, [items, busy]);
   useEffect(() => { itemsRef.current = items; }, [items]);
   useEffect(() => { sessionRef.current = sessionId; }, [sessionId]);
+  useEffect(() => { voiceRef.current = voice; localStorage.setItem('converse_voice', voice ? '1' : '0'); }, [voice]);
+  // Leaving the page must not leave the microphone open or the teacher talking.
+  useEffect(() => () => { loopSeq.current++; stopSpeaking(); }, []);
   // Leaving mid-conversation (including during the goodbye) must still record what
   // was learned — otherwise the two-beat close could silently drop a whole session.
   useEffect(() => () => {
@@ -109,14 +122,39 @@ export default function Converse({ onFallback }) {
         if (reply.inlineRep) next.push({ type: 'rep', rep: reply.inlineRep });
         return next;
       });
-      if (reply.intro?.hanzi) speak(reply.intro.hanzi);
-      const say = reply.followFrame?.hanzi || reply.hanzi;
-      if (say) setTimeout(() => speak(say), reply.intro?.hanzi ? 900 : 0);
       if (reply.excursion) setExcursion(reply.excursion);
       // `closing` is the first beat of the goodbye — the learner still gets to
       // reply. Only `shouldWrap` (the second beat) actually ends the conversation.
       if (reply.shouldWrap) finish(sid, reply.wrapReason);
+      // Speak the turn, then (in voice mode) hand the floor back by arming the mic.
+      // Deliberately not awaited: the UI unblocks as soon as the reply is on screen,
+      // so a slow TTS fetch never holds up reading it.
+      const seq = loopSeq.current;
+      speakTurn(reply).then(() => {
+        // The learner may have typed, toggled voice off or left while this was
+        // speaking; any of those bumped the sequence and this hand-off is now stale.
+        if (seq !== loopSeq.current || finished.current) return;
+        if (voiceRef.current && !reply.shouldWrap) listen({ sid, auto: true });
+      });
     } catch { onFallback?.(); } finally { setBusy(false); }
+  }
+
+  // A teacher turn is up to two sentences (the lead-in, then the sentence itself).
+  // They are spoken in sequence and awaited rather than fired 900ms apart: a fixed gap
+  // either talks over the first line or leaves dead air, and in voice mode it also
+  // decides when the microphone opens — arming it mid-sentence means the teacher
+  // records itself.
+  async function speakTurn(reply) {
+    const seq = loopSeq.current;
+    setPhase('speaking');
+    try {
+      if (reply.intro?.hanzi) await speakAwait(reply.intro.hanzi);
+      if (seq !== loopSeq.current) return;
+      const say = reply.followFrame?.hanzi || reply.hanzi;
+      if (say) await speakAwait(say);
+    } finally {
+      if (seq === loopSeq.current) setPhase('idle');
+    }
   }
 
   // Tap a scaffolded choice → send it as the learner's turn. A confident pick is a
@@ -145,15 +183,57 @@ export default function Converse({ onFallback }) {
     api.conversationComplete({ sessionId: sid, transcript, endedReason }).catch(() => {});
   }
 
-  async function mic() {
-    if (!canSpeak || listening || busy) return;
-    setListening(true); setLevel(0);
+  // Below this, a transcript is shown for confirmation instead of being sent. Sending
+  // a misheard sentence is worse here than in a general voice assistant: the learner
+  // gets corrected for words they never said, which teaches them the wrong lesson
+  // about their own pronunciation. `null` means the recognizer gave us no confidence
+  // signal at all (the Web Speech fallback), which is not evidence of a bad transcript
+  // — treating it as one would break voice mode entirely on those browsers.
+  const CONFIDENT = 0.5;
+
+  // One listening step. In `auto` mode it is the second half of the conversation loop
+  // and re-arms itself once through silence; tapped by hand it is a single capture.
+  async function listen({ sid = sessionId, auto = false, retry = 0 } = {}) {
+    if (!canSpeak || listening || busy || done) return;
+    stopSpeaking();                                  // barge-in: never record the teacher
+    const seq = loopSeq.current;
+    setListening(true); setPhase('listening'); setLevel(0); setHeard(null);
+    let cap = null;
     try {
-      const lastTeacher = [...items].reverse().find(i => i.role === 'assistant')?.hanzi || '';
-      const cap = await captureSpoken({ expectedSyllables: 3, timeoutMs: 6000, onLevel: setLevel, hint: lastTeacher });
-      const spoken = { transcript: cap.transcript, alternatives: cap.alternatives, heardTones: null, timing: cap.timing };
-      if (cap.transcript) { setInput(cap.transcript); pendingSpoken.current = spoken; }
+      const lastTeacher = [...itemsRef.current].reverse().find(i => i.role === 'assistant')?.hanzi || '';
+      cap = await captureSpoken({
+        expectedSyllables: 3, onLevel: setLevel, hint: lastTeacher, sessionId: sid,
+        // Hands-free needs room: a beginner composing a sentence out loud pauses far
+        // longer than someone dictating a text message. Push-to-talk stays snappy.
+        timeoutMs: auto ? 12000 : 6000,
+        silenceMs: auto ? 1100 : 700,
+        noSpeechMs: auto ? 6000 : 0,
+      });
     } catch {} finally { setListening(false); }
+    if (seq !== loopSeq.current || finished.current) { setPhase('idle'); return; }
+
+    const spoken = cap && { transcript: cap.transcript, alternatives: cap.alternatives, heardTones: null, timing: cap.timing };
+
+    if (!cap?.transcript) {
+      setPhase('idle');
+      // Silence in auto mode usually means "still thinking" — offer one more window
+      // before going quiet, rather than either giving up instantly or listening forever.
+      if (auto && retry < 1) return listen({ sid, auto, retry: retry + 1 });
+      return;
+    }
+    pendingSpoken.current = spoken;
+    const sure = cap.confidence === null || cap.confidence >= CONFIDENT;
+    if (auto && sure) { setPhase('thinking'); return turn(cap.transcript, false, spoken, sid); }
+    // Unsure, or hand-tapped: show it and let them decide.
+    setInput(cap.transcript);
+    setPhase('idle');
+    if (!sure) setHeard({ text: cap.transcript, confidence: cap.confidence });
+  }
+
+  function toggleVoice() {
+    loopSeq.current++;                               // abandon any loop already in flight
+    stopSpeaking(); setPhase('idle'); setHeard(null);
+    setVoice(v => !v);
   }
 
   // Live pinyin IME: typing latin that looks like pinyin shows a hanzi preview;
@@ -183,7 +263,8 @@ export default function Converse({ onFallback }) {
     if (!text) return;
     // Typed pinyin auto-converts on send — the preview showed what it becomes.
     if (ime?.ok && ime.hanzi && /^[a-zA-Z' ]+$/.test(text)) text = ime.hanzi;
-    setIme(null);
+    setIme(null); setHeard(null);
+    loopSeq.current++;                 // typing wins over anything the mic is doing
     const spoken = pendingSpoken.current && pendingSpoken.current.transcript === text ? pendingSpoken.current : null;
     turn(text, false, spoken);
   }
@@ -240,8 +321,21 @@ export default function Converse({ onFallback }) {
         <div className="mt-4 text-center text-ink-soft text-sm py-4 border-t border-line">聊到这儿 · 明天见</div>
       ) : (
         <div className="mt-3">
-          {listening && <div className="text-center text-sm text-rose-500 mb-2 animate-pulse">Listening… speak now</div>}
+          {voice && <VoiceStatus phase={phase} listening={listening} level={level} />}
+          {!voice && listening && <div className="text-center text-sm text-rose-500 mb-2 animate-pulse">Listening… speak now</div>}
+          {heard && (
+            <HeardConfirm heard={heard} onSend={() => { setHeard(null); submitTyped(); }}
+              onRetry={() => { setHeard(null); setInput(''); listen({ auto: voice }); }} />
+          )}
           <div className="mb-2 flex items-center gap-2">
+            {canSpeak && (
+              <button type="button" onClick={toggleVoice}
+                className={`text-[12px] rounded-full px-3 py-1 border transition ${
+                  voice ? 'bg-ink text-white border-ink' : 'text-ink-soft hover:text-ink border-line bg-white/70'}`}
+                title={voice ? 'Switch to typing' : 'Talk instead of typing — Laoshi listens after every turn'}>
+                {voice ? '🎙 voice · on' : '🎙 talk instead'}
+              </button>
+            )}
             <button type="button" onClick={() => { setInput('How do I say '); inputRef.current?.focus(); }}
               className="text-[12px] text-ink-soft hover:text-ink border border-line rounded-full px-3 py-1 bg-white/70">
               💬 Help me say something…
@@ -262,11 +356,12 @@ export default function Converse({ onFallback }) {
           )}
           <div className="flex items-center gap-2">
             {canSpeak && (
-              <button type="button" onClick={mic} disabled={busy}
+              <button type="button" onClick={() => (listening ? loopSeq.current++ : listen({ auto: voice }))} disabled={busy}
                 style={listening ? { transform: `scale(${micScale})` } : undefined}
                 className={`w-14 h-14 shrink-0 rounded-full grid place-items-center text-2xl transition ${
-                  listening ? 'bg-rose-500 text-white shadow-lg shadow-rose-200' : 'bg-ink text-white hover:opacity-90'}`}
-                title="Speak">🎤</button>
+                  listening ? 'bg-rose-500 text-white shadow-lg shadow-rose-200'
+                    : phase === 'speaking' ? 'bg-jade-500 text-white' : 'bg-ink text-white hover:opacity-90'}`}
+                title={phase === 'speaking' ? 'Interrupt and speak' : 'Speak'}>🎤</button>
             )}
             <form onSubmit={(e) => { e.preventDefault(); submitTyped(); }} className="flex-1 flex items-center gap-2">
               <input ref={inputRef} value={input} onChange={(e) => onInputChange(e.target.value)}
@@ -277,6 +372,50 @@ export default function Converse({ onFallback }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Whose turn it is, in one line. A hands-free conversation has no cursor and no send
+// button, so without this the learner cannot tell whether the app is talking, waiting
+// for them, or thinking — and they end up talking over it.
+function VoiceStatus({ phase, listening, level }) {
+  const state = listening ? 'listening' : phase;
+  const bars = Math.max(1, Math.min(5, Math.round(level * 60)));
+  const label = {
+    speaking: ['老师在说…', 'tap the mic to jump in'],
+    listening: ['该你了 · your turn', 'just talk — it sends itself when you stop'],
+    thinking: ['老师在想…', ''],
+    idle: ['', ''],
+  }[state] || ['', ''];
+  if (!label[0]) return null;
+  return (
+    <div className={`mb-2 flex items-center justify-center gap-2 text-sm ${
+      state === 'listening' ? 'text-rose-500' : 'text-ink-soft'}`}>
+      {state === 'listening' && (
+        <span className="flex items-end gap-[2px] h-4" aria-hidden>
+          {[1, 2, 3, 4, 5].map(i => (
+            <span key={i} className={`w-[3px] rounded-full transition-all ${i <= bars ? 'bg-rose-500' : 'bg-rose-200'}`}
+              style={{ height: `${4 + (i <= bars ? i * 2.5 : 0)}px` }} />
+          ))}
+        </span>
+      )}
+      <span className={state === 'speaking' ? 'animate-pulse' : ''}>{label[0]}</span>
+      {label[1] && <span className="text-[11px] text-ink-faint">· {label[1]}</span>}
+    </div>
+  );
+}
+
+// A transcript the recognizer was not sure about. Shown rather than sent, because
+// being corrected for a sentence you did not say is worse than one extra tap — the
+// learner would conclude their pronunciation was wrong when it was the microphone.
+function HeardConfirm({ heard, onSend, onRetry }) {
+  return (
+    <div className="mb-2 flex items-center gap-2 px-3 py-2 rounded-2xl bg-amber-50/70 border border-amber-200">
+      <span className="text-[11px] text-amber-700 shrink-0">not sure I heard that —</span>
+      <span className="hanzi text-lg text-ink flex-1 truncate">{heard.text}</span>
+      <button onClick={onRetry} className="text-[12px] text-ink-soft hover:text-ink border border-line rounded-full px-2.5 py-1 bg-white/80">再说一次</button>
+      <button onClick={onSend} className="text-[12px] text-white bg-ink rounded-full px-2.5 py-1">对 · send</button>
     </div>
   );
 }

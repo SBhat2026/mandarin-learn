@@ -413,18 +413,31 @@ export function invitesResponse({ turns }) {
 
 // Does the teacher pick up what the learner actually said? Without this the turns can
 // all end in a question and still be a script being read at someone.
+//
+// Only CONTENT characters count. Matching on any shared character made this probe lie
+// in both directions: a reply sharing only 我 or 的 with the learner scored as
+// responsive (nearly everything does, so the upper levels read high for free), while a
+// beginner who said one noun got a flat miss. Pronouns, the copula and particles are
+// the connective tissue of every Mandarin sentence — they are evidence of grammar, not
+// of listening.
+const FUNCTION_CHARS = new Set([...'我你您他她它的了是在有和也很不吗呢啊吧吗嘛这那个么什么就都还要会对能']);
+
 export function picksUpLearner({ turns }) {
-  const pairs = turns.filter(t => t.userText && !t.wasConfusion && t.reply?.hanzi);
-  if (!pairs.length) return { ok: true, severity: 'warn', detail: 'no learner turns', evidence: [], skipped: true };
-  const echoed = pairs.filter(t => {
-    const said = [...String(t.userText)].filter(c => /[一-鿿]/.test(c));
-    return said.length && said.some(ch => t.reply.hanzi.includes(ch));
-  });
+  const content = (s) => [...new Set([...String(s || '')].filter(c => /[一-鿿]/.test(c) && !FUNCTION_CHARS.has(c)))];
+  const pairs = turns
+    .filter(t => t.userText && !t.wasConfusion && t.reply?.hanzi)
+    .map(t => ({ ...t, said: content(t.userText) }))
+    // A turn carrying no content characters ("好", bare pinyin) offers nothing to pick
+    // up. Counting it as a miss would penalise the teacher for the learner's turn.
+    .filter(t => t.said.length);
+  if (!pairs.length) return { ok: true, severity: 'warn', detail: 'no learner turns carried content words', evidence: [], skipped: true };
+  const echoed = pairs.filter(t => t.said.some(ch => t.reply.hanzi.includes(ch)));
   const ratio = echoed.length / pairs.length;
   return {
     ok: ratio >= 0.3, severity: 'warn',
-    detail: `${echoed.length}/${pairs.length} replies reused something the learner said (${Math.round(ratio * 100)}%)`,
-    evidence: [],
+    detail: `${echoed.length}/${pairs.length} replies reused a content word the learner said (${Math.round(ratio * 100)}%)`,
+    evidence: pairs.filter(t => !echoed.includes(t)).slice(0, 3)
+      .map(t => `turn ${t.i}: learner said ${t.said.join('')} — reply "${t.reply.hanzi}" picks up none of it`),
   };
 }
 

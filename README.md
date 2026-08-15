@@ -234,6 +234,21 @@ something real and is left alone; at the top band the same answer is corrected t
 because letting it pass is how someone ends up fluent in pinyin and illiterate in
 Chinese. See the strictness table in [docs/ladder.md](docs/ladder.md).
 
+### Talking instead of typing
+
+Tap **🎙 talk instead** in a conversation and it goes hands-free: Laoshi speaks, the
+microphone arms itself when the sentence ends, and your reply sends when you stop
+talking. The text never goes away — the interlinear is the lesson, and you cannot learn
+characters from audio.
+
+What makes this worth doing here rather than in any voice assistant is that the
+recognizer is told which words the session has taught, so a hesitant, tone-flat 钱 is no
+longer ambiguous audio. Locally the model stays resident (`server/whisperd.py`, ~1.7s an
+utterance instead of ~5s); hosted it uses Groq. A transcript the recognizer is unsure of
+is shown for confirmation rather than sent, because being corrected for a sentence you
+never said teaches the wrong lesson about your own pronunciation. See
+[docs/voice.md](docs/voice.md).
+
 ### Tuning how Laoshi teaches Mandarin
 
 `server/mandarin.md` is the editable half of Laoshi's prompt: tones, measure words,
